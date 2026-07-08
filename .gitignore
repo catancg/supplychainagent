@@ -1,0 +1,17 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+chroma_data/
+action_log.json
+eval_log.json
+.ruff_cache/
+
+# Claude Code local tooling artifacts — not part of the project
+.claude/settings.local.json
+.agents/
+skills-lock.json
+
+# ADK local session storage (created by `adk run`/`adk web`) — runtime state
+agents/.adk/

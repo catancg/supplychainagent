@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(uv sync *)",
+      "Bash(uv run *)",
+      "WebSearch",
+      "Read(//c/Users/Catan/AppData/Local/Temp/agents_log/**)",
+      "Bash(uv run python -c ' *)"
+    ]
+  }
+}

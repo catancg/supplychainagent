@@ -1,0 +1,255 @@
+# PRD — Supply Chain Multi-Agent System (MVP)
+
+**Status:** Draft v4 — slimmed MVP (for review)
+**Author:** Carlos (with Claude)
+**Implementer:** A separate Claude Code instance
+**Type:** Greenfield learning project. **Focus: the AI/agent side.** The deterministic side is the smallest substrate that gives the agents something real to reason about — nothing more.
+
+---
+
+## 1. What this is
+
+A multi-agent system in **Google ADK** where a supervisor coordinates three specialists — **demand, inventory, procurement** — to produce a supply-chain action plan for a given situation. The learning goals are all on the AI side:
+
+1. **Inter-agent communication through shared state** (ADK `session.state`).
+2. **RAG** — agents ground reasoning in a small policy corpus.
+3. **MCP** — an agent queries an external system over MCP.
+4. **Guardrails & basic security** — including treating retrieved/external content as untrusted.
+5. **Automatic evaluation** — ≥2 cases with deterministic assertions + LLM-as-judge.
+
+### Core principle (do not violate)
+
+> **LLM agents orchestrate; deterministic tools compute.** The tiny tools do the arithmetic; the agents decide when to call them, interpret results, retrieve policy, consult external data, reconcile conflicts, and explain decisions.
+
+### Deliberately cut (was in earlier drafts, not needed for AI learning)
+
+No discrete-time simulator, no baseline policy, no horizon metrics, no database/ORM, no distribution or risk agent. The world is **static scenario fixtures**, not a running simulation.
+
+---
+
+## 2. Shape of the MVP
+
+```
+ Scenario fixture (JSON)                    Eval harness
+ world snapshot + situation                 loads scenario → runs agents →
+        │                                   grades plan (assertions + judge)
+        ▼                                            ▲
+   session.state  ◄──────────────────────────────────┘
+        │  (shared blackboard, §4)
+        ▼
+ ┌──────────────────────────┐
+ │ Supervisor (Gemini Flash) │  invokes specialists, reads recs from state,
+ │  reconciles → ActionPlan  │  reconciles, runs plan through guardrails
+ └───────┬───────┬───────┬───┘
+         ▼       ▼       ▼        (each Gemini Flash-Lite)
+      Demand  Inventory Procurement
+         │       │       │
+      tiny deterministic tools  +  RAG (policy)  +  MCP (external data)
+         │
+   ActionPlan → guardrails/approval → action_log.json
+```
+
+Flow: load a scenario into state → supervisor invokes the three specialists → each reads state, calls its tools (and RAG/MCP where assigned), writes a structured recommendation to state → supervisor reconciles into one `ActionPlan` → guardrails validate → plan is written to the action log. The eval harness drives this over the scenario set.
+
+Interface: **`adk web`** to run a scenario and inspect agents, state, and the plan. No custom UI.
+
+---
+
+## 3. Scenario fixtures (the whole "world")
+
+A handful of JSON files in `scenarios/`. Each defines a world snapshot + a situation. Loaded into memory; no DB.
+
+```json
+{
+  "situation": "demand_spike",            // normal | demand_spike | supplier_down
+  "warehouses": [{"id": "CABA"}, {"id": "COR"}, {"id": "MDZ"}],
+  "skus": [
+    {"id": "AC-12", "name": "Air conditioner 3000F",
+     "recent_demand": [4, 5, 4, 6, 18, 20],   // trailing daily units
+     "inventory": {"CABA": 8, "COR": 3, "MDZ": 2}}
+    // ~8–12 SKUs total
+  ],
+  "suppliers": [
+    {"id": "S-DOM", "skus": ["AC-12"], "unit_cost": 100, "currency": "ARS",
+     "lead_time_days": 7, "reliability": 0.95, "available": true},
+    {"id": "S-IMP", "skus": ["AC-12"], "unit_cost": 0.7, "currency": "USD",
+     "lead_time_days": 40, "reliability": 0.85, "available": true}
+  ],
+  "budget_per_cycle": 500000
+}
+```
+
+Situations just tweak the numbers: `demand_spike` inflates recent demand for some SKUs; `supplier_down` sets a key supplier's `available: false`. Three or four fixtures total.
+
+---
+
+## 4. Inter-agent communication via state
+
+Communication is through ADK `session.state`, used as a blackboard; tools access it via `ToolContext.state`.
+
+| Key | Written by | Read by | Contents |
+|---|---|---|---|
+| `world` | loader | all | the scenario snapshot |
+| `rec:demand` | demand agent | supervisor | `DemandRecommendation` |
+| `rec:inventory` | inventory agent | supervisor | `InventoryRecommendation` |
+| `rec:procurement` | procurement agent | supervisor | `ProcurementRecommendation` |
+| `action_plan` | supervisor | guardrails, log | `ActionPlan` |
+| `guardrail_trips` | callbacks | log | blocked/altered items |
+
+Mechanism: each specialist ends by calling `emit_recommendation(rec)` — a tool that validates against its Pydantic schema and writes `state["rec:<domain>"]`. (Do **not** use ADK `output_schema` on agents that use tools — it disables tool use; the emit-to-state tool is the workaround.) The supervisor reads the `rec:*` keys and writes `action_plan`.
+
+---
+
+## 5. Agents
+
+All Gemini (see §9). Small, flat Pydantic schemas in `agents/schemas.py`.
+
+**Supervisor** (Gemini Flash). Tools: the three specialists as `AgentTool`s, `read_recommendations`, `emit_action_plan`. Invokes specialists, reads their recs from state, reconciles into one `ActionPlan` against this order: (1) cover the demand/shortfall, (2) then minimize cost, (3) respect the budget cap. Records a short rationale.
+
+| Specialist | Reasoning role | Tools | RAG | MCP |
+|---|---|---|---|---|
+| **Demand** (Flash-Lite) | Read recent demand, call forecast, flag spikes, output per-SKU outlook. | `forecast_demand(sku)` | — | — |
+| **Inventory** (Flash-Lite) | Decide which SKU/warehouse need replenishment and how much. | `get_inventory_position(sku, wh)`, `compute_reorder_point(sku, wh)` | stocking policy | — |
+| **Procurement** (Flash-Lite) | Choose supplier per order (cost vs lead time vs reliability; handle a supplier being down); respect budget. | `rank_suppliers(sku)`, `estimate_landed_cost(supplier, sku, qty)` | supplier policy | `get_fx_rate` |
+
+`ActionPlan` = list of proposed purchase orders `{sku, supplier, qty, dest_warehouse, est_cost}` + rationale.
+
+---
+
+## 6. Deterministic tools (keep tiny)
+
+Pure functions, a few lines each, unit-tested. They read the scenario from state.
+
+- `forecast_demand(sku)` — trailing average of `recent_demand` (optionally weight the last few points). Returns a number.
+- `get_inventory_position(sku, wh)` — reads on-hand from the scenario.
+- `compute_reorder_point(sku, wh)` — `avg_daily_demand × lead_time + safety_buffer`. Simple.
+- `rank_suppliers(sku)` — filter to `available` suppliers covering the SKU, score by weighted (cost, lead_time, reliability), return sorted.
+- `estimate_landed_cost(supplier, sku, qty)` — `unit_cost × qty`, converted with the FX rate from MCP if the supplier's currency is USD.
+
+That's the entire deterministic tool surface.
+
+---
+
+## 7. RAG (minimal)
+
+- **Corpus (`kb/`):** ~5–8 short markdown policy notes — stocking policy (target buffer by category), supplier/procurement policy (preferred-supplier rules, when to accept a long lead time, budget discipline). Authored as seed content.
+- **Store:** ChromaDB (local). **Embeddings:** Gemini text embeddings (free tier).
+- **Ingest (`rag/ingest.py`):** load → chunk → embed → upsert. Idempotent.
+- **Tool:** `search_policy(query, k=3)` → returns chunks + source. Used by inventory and procurement. Rationales should cite the policy they used.
+
+---
+
+## 8. MCP (minimal)
+
+- **Server (`mcp_server/market_data.py`):** a small local MCP server (MCP SDK / FastMCP) over stdio, read-only, returning synthetic-but-deterministic data. Start with **one tool**: `get_fx_rate(base="USD", quote="ARS") -> float`. (Add `get_supplier_rating` later if wanted.)
+- **Wiring:** attach to the procurement agent via ADK's `MCPToolset` (stdio connection params). Procurement uses the FX rate inside `estimate_landed_cost`.
+- **Why it's real:** a separate process speaking MCP, not an in-app function — that's the point of the exercise.
+
+> Verify ADK's current MCP toolset / connection API against the docs; it changes across versions.
+
+---
+
+## 9. Guardrails & security (essentials only)
+
+Two things, both AI-side learning:
+
+1. **Untrusted content (the security lesson).** RAG chunks and MCP responses are **data, not instructions**. An `after_tool_callback` on `search_policy` and the MCP tool wraps their output as reference-only and neutralizes obvious injection patterns (e.g. "ignore previous instructions"). Agent instructions state external content never triggers actions.
+2. **Action validation (the approval gate).** Before the `ActionPlan` is accepted: reject/clamp negative or absurd quantities, reject plans over `budget_per_cycle`, and never order from an `available: false` supplier. Trips are recorded in `guardrail_trips` and the action log. Implement via `before_tool_callback` on `emit_action_plan` (or a plain validator the supervisor must pass through).
+
+Also: `GOOGLE_API_KEY` in `.env` (git-ignored), never logged.
+
+---
+
+## 10. Evaluation (the scenarios are the eval cases)
+
+`evals/` runs each scenario fixture through the agents and grades the resulting `ActionPlan` with two layers.
+
+**Cases (≥2):**
+1. **demand_spike** — recent demand for an SKU jumps. Expect: the plan orders more of that SKU / prioritizes the short warehouse.
+2. **supplier_down** — the cheap supplier of a key SKU is `available: false`. Expect: the plan avoids it and picks an available alternate (or flags the gap), staying within budget.
+
+**Layer A — deterministic assertions (authoritative pass/fail):** programmatic checks on the structured `ActionPlan` (SKU ordered qty above threshold; the down supplier not used; total within budget).
+
+**Layer B — LLM-as-judge (directional):** a judge model (Gemini Flash) scores the supervisor rationale 1–5 on: faithfulness (matches the data + recs), constraint-adherence (budget/availability), relevance (addresses the situation). Returns structured JSON. Noisy — Layer A gates, Layer B informs.
+
+---
+
+## 11. Models (Gemini, ADK-native)
+
+Cheap, per-role, config-swappable. Prices per 1M tokens (input/output), verify before use.
+
+| Role | Config key | Default | ~Price |
+|---|---|---|---|
+| Specialists (×3) | `SPECIALIST_MODEL` | `gemini-2.5-flash-lite` | $0.10 / $0.40 |
+| Supervisor | `SUPERVISOR_MODEL` | `gemini-3-flash` | ~$0.50 / $3 |
+| Judge | `JUDGE_MODEL` | `gemini-3-flash` | ~$0.50 / $3 |
+| Embeddings | `EMBEDDING_MODEL` | Gemini text embeddings | free tier |
+
+Free tier (Flash/Flash-Lite) is fine for development — data-training clause is moot since all data is synthetic. Add backoff on `429`. Cost is cents per full eval run.
+
+---
+
+## 12. Tech stack
+
+Python 3.11+ · `uv` (or pip+venv) · `google-adk` · Gemini API (`GOOGLE_API_KEY`) · `chromadb` · MCP SDK (`mcp` / FastMCP) · `pydantic` · `pytest`. No database, no ORM, no Ollama/LiteLlm, no OR-Tools.
+
+---
+
+## 13. Project structure
+
+```
+supply-agents/
+  pyproject.toml
+  README.md
+  .env.example              # GOOGLE_API_KEY, model ids
+  scenarios/*.json          # world snapshots + situations
+  loader.py                 # load scenario → session.state
+  tools/
+    demand_tools.py
+    inventory_tools.py
+    procurement_tools.py
+  rag/{ingest.py,search.py}
+  kb/*.md                   # policy corpus
+  mcp_server/market_data.py
+  agents/
+    schemas.py              # Pydantic recs + ActionPlan
+    demand_agent.py
+    inventory_agent.py
+    procurement_agent.py
+    supervisor_agent.py
+    guardrails.py           # callbacks + action validator
+  evals/{cases.py,judge.py,run_evals.py}
+  action_log.json
+  tests/{test_tools.py,test_guardrails.py}
+```
+
+---
+
+## 14. Milestones
+
+- **M0 — Substrate, no agents.** Scenario fixtures + loader + the 5 tiny tools + RAG (corpus, ingest, `search_policy`) + MCP server with `get_fx_rate`. Everything callable standalone; `pytest` on tools and guardrail validator.
+- **M1 — Specialists + state.** Three Flash-Lite agents using their tools (and RAG/MCP), writing structured recs to `session.state`. Inspect each in `adk web`.
+- **M2 — Supervisor + guardrails.** Specialists as `AgentTool`s; state-based reconciliation → `ActionPlan`; guardrail callbacks; write to `action_log.json`.
+- **M3 — Evals.** The two scenario cases with Layer-A assertions + Layer-B judge; README with run instructions.
+
+---
+
+## 15. Acceptance criteria
+
+- `adk web` runs a scenario; supervisor + three specialists visible and invocable.
+- Specialists write schema-valid recs to `session.state`; supervisor reads them from state (state contract exercised).
+- `search_policy` returns relevant chunks with sources; a rationale cites a policy.
+- The MCP server launches over stdio and procurement uses its FX rate in a landed-cost calc.
+- Supervisor emits one `ActionPlan` + rationale to `action_log.json`.
+- Guardrails demonstrated: an over-budget plan is blocked; an injection string in a KB/MCP response doesn't change the plan.
+- ≥2 eval cases run; Layer-A assertions pass; Layer-B judge returns structured scores.
+- Tools + guardrail validator have passing unit tests.
+
+---
+
+## 16. Open questions / defaults (confirm or adjust)
+
+1. **Agent count:** MVP = 3 (demand, inventory, procurement). Adding risk/distribution later is cheap since the pattern is identical. Keep 3?
+2. **World storage:** JSON fixtures in memory (simplest). Prefer SQLite if you'd rather query state — but it adds code you said you don't want.
+3. **MCP scope:** one tool (`get_fx_rate`) for the MVP. Add `get_supplier_rating` now, or later?
+4. **Later (explicitly out of MVP):** the discrete-time simulator + baseline comparison can return as a Phase 2 if you ever want to watch decisions play out over time. Nothing here blocks it.
