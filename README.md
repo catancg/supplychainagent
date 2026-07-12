@@ -118,6 +118,18 @@ Open http://127.0.0.1:8000. Three pages:
   row from `data/supply_agents.db`, newest first, full JSON behind a
   `<details>` toggle (no JS needed).
 
+**Sessions persist across restarts** (`docs/phase1-session-persistence.prd`)
+— the webapp uses ADK's `DatabaseSessionService`, pointed at the same
+`data/supply_agents.db` file (different tables, managed automatically by
+ADK — no conflict with `action_plans`/`eval_results`). Restart `uvicorn` and
+a prior run's full session/event history is still there; there's just no UI
+to browse it yet (out of scope for this piece — see the PRD). `evals.run_evals`
+deliberately keeps using in-memory sessions — eval runs are self-contained
+and already produce a durable record via the log store, so they don't need
+this. Requires the `google-adk[db]` extra + `aiosqlite` (added to
+`pyproject.toml`). Separately, `adk web`/`adk run`'s own session persistence
+(`agents/.adk/session.db`) is untouched — different mechanism, out of scope.
+
 Requires `GOOGLE_API_KEY` — clicking "Run" makes real Gemini calls, same as
 `adk run`/`adk web`.
 

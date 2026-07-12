@@ -14,7 +14,7 @@ import time
 from typing import Any
 
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import DatabaseSessionService
 from google.genai import types
 
 import db
@@ -31,6 +31,17 @@ RETRY_BACKOFF_SECONDS = 10
 _CASE_BY_SCENARIO = {c.scenario: c for c in CASES}
 
 db.init_db()
+
+# Persistent (docs/phase1-session-persistence.prd) — same DB file the log
+# store uses, different tables (ADK manages its own schema automatically,
+# no conflict with action_plans/eval_results). One shared service instance,
+# not one per request: it owns a real SQLAlchemy engine/connection pool
+# backed by a file, not an in-process dict, so it should be reused rather
+# than reopened on every run. evals/run_evals.py deliberately keeps using
+# InMemorySessionService — eval runs are self-contained and already produce
+# a durable record via the log store, so they don't need this (§6.1 of the PRD).
+_SESSION_DB_URL = f"sqlite+aiosqlite:///{db.DB_PATH.as_posix()}"
+_session_service = DatabaseSessionService(db_url=_SESSION_DB_URL)
 
 
 def list_scenario_summaries() -> list[dict[str, Any]]:
@@ -94,7 +105,7 @@ async def _run_scenario_once(scenario_id: str) -> dict[str, Any]:
     world = load_scenario(scenario_id)
     world["situation"] = world.get("situation")
 
-    session_service = InMemorySessionService()
+    session_service = _session_service
     session = await session_service.create_session(
         app_name=APP_NAME,
         user_id=USER_ID,
