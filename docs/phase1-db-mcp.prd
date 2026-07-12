@@ -1,0 +1,143 @@
+# PRD — Phase 1: Persistent Log Store via MCP
+
+**Status:** Draft v2 (decisions finalized, ready for implementation)
+**Author:** Carlos (with Claude)
+**Depends on:** none (this is the foundation the session-persistence PRD builds on — same DB file)
+**Type:** Phase 1 of the post-MVP roadmap. See `docs/feature.prd` for the base system this extends.
+
+---
+
+## 1. What this is
+
+Replaces the current `action_log.json` / `eval_log.json` direct file writes with a real SQLite database, written through a **new MCP server** — a second, write-oriented MCP use case alongside the existing read-only `mcp_server/market_data.py` (`get_fx_rate`).
+
+This is a deliberate reversal of `docs/feature.prd`'s original "no database/ORM" cut. That cut was correct for the MVP; Phase 1 explicitly wants to demonstrate an agent writing to an external system via MCP, and JSON-file-append doesn't demonstrate that.
+
+### Core principle for this piece
+
+**MCP is for agent-initiated writes only.** The supervisor (an LLM deciding to call a tool) writes action plans through MCP. Our own deterministic code — `evals/run_evals.py`, the webapp's history page — reads and writes the same database directly (a shared Python DB helper), with no MCP round-trip. MCP overhead is only justified where an LLM is actually making the call/no-call decision.
+
+---
+
+## 2. Scope
+
+**In scope:**
+- One SQLite file, one new MCP server, two new tables (`action_plans`, `eval_results`).
+- Supervisor gets a new tool to log an accepted `ActionPlan`.
+- `evals/run_evals.py` writes eval results to the same DB (direct, not via MCP).
+- Webapp's `/history` page reads from the DB instead of the JSON files.
+
+**Out of scope (explicitly):**
+- Migrating existing `action_log.json`/`eval_log.json` history into the DB — those files are dev-run artifacts, not source; a fresh DB starting empty is fine.
+- Any read-side MCP tools (e.g. "let the agent query its own past plans") — not asked for, not needed for this piece.
+- A general-purpose ORM layer. Two tables, plain SQL (via `sqlite3` or SQLAlchemy Core, not an ORM) is enough.
+
+---
+
+## 3. Data model
+
+One file: `data/supply_agents.db` (new `data/` directory, git-ignored — a run artifact, same treatment as the JSON logs it replaces). Shared with the session-persistence piece, which manages its own tables in the same file (see that PRD — no schema conflict, ADK owns its tables, we own ours).
+
+**Local, not an external DB service — decided.** An external service (e.g. Supabase) was considered and rejected for this piece: it would add a new secret to manage, a new network dependency, and a new failure mode, for no benefit on a single-operator dev/demo tool with no concurrent-writer or remote-access requirement. Not a one-way door — `db.py` and `DatabaseSessionService` (session-persistence PRD) both take an arbitrary connection string, so moving to a hosted Postgres later is a config change, not a rewrite, if that need ever materializes.
+
+```sql
+CREATE TABLE action_plans (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp TEXT NOT NULL,              -- ISO 8601 UTC
+  situation TEXT,
+  purchase_orders_json TEXT NOT NULL,   -- JSON array of {sku, supplier, qty, dest_warehouse, est_cost}
+  rationale TEXT,
+  guardrail_trips_json TEXT NOT NULL,   -- JSON array
+  total_cost REAL NOT NULL
+);
+
+CREATE TABLE eval_results (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp TEXT NOT NULL,
+  case_name TEXT NOT NULL,
+  scenario TEXT NOT NULL,
+  description TEXT,
+  layer_a_json TEXT NOT NULL,           -- JSON array of assertion results
+  layer_a_passed INTEGER NOT NULL,      -- 0/1
+  layer_b_json TEXT,                    -- JSON judge scores, nullable
+  action_plan_json TEXT,                -- nullable — a failed case has no plan at all
+  guardrail_trips_json TEXT NOT NULL,
+  error TEXT                            -- nullable, matches today's eval_log.json "error" field
+);
+```
+
+Mirrors the current JSON log entry shapes field-for-field — this is a storage-layer swap, not a data-model redesign.
+
+---
+
+## 4. MCP server design
+
+New file: `mcp_server/log_store.py`, same pattern as `market_data.py` (FastMCP, stdio, a separate process).
+
+```python
+@mcp.tool()
+def write_action_plan(
+    timestamp: str,
+    situation: str,
+    purchase_orders: list[dict],
+    rationale: str,
+    guardrail_trips: list[dict],
+) -> dict:
+    """Persists an accepted ActionPlan to the log store. Returns {"id": <row id>}."""
+```
+
+Only **one** tool for Phase 1 (`write_action_plan`). `write_eval_result` is deliberately NOT an MCP tool — eval logging is driven by our own deterministic harness (`evals/run_evals.py`), not an agent decision, so it uses a shared Python DB helper directly (see `db.py` below), consistent with the core principle in §1.
+
+---
+
+## 5. Shared DB helper
+
+New module `db.py` (repo root, alongside `loader.py`) — the single place that knows the schema, used by:
+- `mcp_server/log_store.py`'s `write_action_plan` tool
+- `evals/run_evals.py`'s eval-result writer (replacing `_append_to_eval_log`)
+- `webapp/runner_service.py`'s `load_action_log()`/`load_eval_log()` (replacing the JSON readers)
+
+```python
+DB_PATH = Path(__file__).resolve().parent / "data" / "supply_agents.db"
+
+def init_db() -> None: ...          # CREATE TABLE IF NOT EXISTS, idempotent
+def insert_action_plan(...) -> int: ...
+def insert_eval_result(...) -> int: ...
+def list_action_plans(limit: int | None = None) -> list[dict]: ...
+def list_eval_results(limit: int | None = None) -> list[dict]: ...
+```
+
+Plain `sqlite3` (stdlib, no new dependency) is enough — no ORM, consistent with `docs/feature.prd`'s "no ORM" principle, which Phase 1 isn't reversing, only "no database."
+
+---
+
+## 6. Integration points
+
+- **Supervisor instruction** (`agents/supervisor_agent.py`): new step 6 — "After `emit_action_plan` returns `status: ok`, call `write_action_plan` with the same data to persist it." Wired via a new `McpToolset` pointed at `mcp_server/log_store.py`, same pattern as procurement's `get_fx_rate` toolset.
+- **`agents/plan_tools.py`**: `emit_action_plan` stops calling `_append_to_action_log` (the direct JSON write) — persistence moves entirely to the new MCP step. `ACTION_LOG_PATH`/`_append_to_action_log` get removed.
+- **`evals/run_evals.py`**: `_append_to_eval_log`/`EVAL_LOG_PATH` replaced with `db.insert_eval_result(...)`.
+- **`webapp/runner_service.py`**: `load_action_log()`/`load_eval_log()` replaced with `db.list_action_plans()`/`db.list_eval_results()`. Templates (`index.html`, `history.html`) need no changes if the returned dict shapes match what they already expect.
+
+---
+
+## 7. Risk: LLM-instruction-following reliability
+
+The supervisor deciding to call `write_action_plan` is a new point where the model could skip a step (this session hit exactly this failure mode more than once with the emit tools). Mitigation: instruction explicitly frames it as mandatory ("always end by calling `write_action_plan` after a successful `emit_action_plan`"), and — if live testing shows it's unreliable — the fallback is moving the write into `emit_action_plan`'s own `before_tool_callback`/tool body as a deterministic Python side-effect instead of a separate LLM-decided call, at the cost of no longer demonstrating an agent-initiated MCP write. Flagging this now so it isn't a surprise during implementation.
+
+---
+
+## 8. Acceptance criteria
+
+- `data/supply_agents.db` is created on first run (`init_db()` called at startup by both the webapp and eval harness).
+- Running a scenario through the webapp results in a new row in `action_plans` (verified by querying the DB directly, not just trusting the UI).
+- Running `evals.run_evals` results in a new row in `eval_results` per case.
+- Webapp's `/history` page renders from the DB and looks the same as it did from the JSON files.
+- `mcp_server/log_store.py` runs standalone the same way `market_data.py` does (`uv run python -m mcp_server.log_store`, blocks on stdio).
+- Existing tests updated: no test should still assert against `action_log.json`/`eval_log.json` file paths.
+
+---
+
+## 9. Decisions
+
+1. **Rejected plans are not logged** — parity with today's behavior. `write_action_plan` only fires after a successful `emit_action_plan` (`status: ok`), same as the JSON log it replaces.
+2. **`data/supply_agents.db`** at repo root, as proposed — no objection raised.

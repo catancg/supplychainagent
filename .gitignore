@@ -4,8 +4,7 @@ __pycache__/
 .pytest_cache/
 .venv/
 chroma_data/
-action_log.json
-eval_log.json
+data/
 .ruff_cache/
 
 # Claude Code local tooling artifacts — not part of the project

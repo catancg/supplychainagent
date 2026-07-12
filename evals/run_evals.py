@@ -4,10 +4,12 @@ Layer B LLM-as-judge (directional). docs/feature.prd §10.
 
 Run with: uv run python -m evals.run_evals [case_name ...]
 
-Each case's result is appended to eval_log.json (repo root, git-ignored — a
-run artifact, like action_log.json) IMMEDIATELY after it finishes, not only
-at the end of the whole batch. A transient network error partway through a
-multi-case run must not discard results from cases that already succeeded.
+Each case's result is written to the eval_results table (data/supply_agents.db,
+via db.py — see docs/phase1-db-mcp.prd) IMMEDIATELY after it finishes, not
+only at the end of the whole batch. A transient network error partway
+through a multi-case run must not discard results from cases that already
+succeeded. This is a direct DB write, not through MCP — eval logging is
+driven by this deterministic harness, not an agent decision (docs/phase1-db-mcp.prd §1).
 """
 
 from __future__ import annotations
@@ -15,16 +17,15 @@ from __future__ import annotations
 import argparse
 import asyncio
 import dataclasses
-import json
 import sys
 from datetime import datetime, timezone
-from pathlib import Path
 
 from dotenv import load_dotenv
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
+import db
 from agents.supervisor_agent import create_app
 from evals.cases import CASES, EvalCase
 from evals.judge import judge_rationale
@@ -32,7 +33,6 @@ from loader import load_scenario
 
 APP_NAME = "supply_agents_eval"
 USER_ID = "eval_user"
-EVAL_LOG_PATH = Path(__file__).resolve().parent.parent / "eval_log.json"
 MAX_RETRIES = 2
 RETRY_BACKOFF_SECONDS = 10
 
@@ -142,15 +142,19 @@ def _serialize_result(result: dict) -> dict:
     }
 
 
-def _append_to_eval_log(entry: dict) -> None:
-    log = []
-    if EVAL_LOG_PATH.exists():
-        try:
-            log = json.loads(EVAL_LOG_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            log = []
-    log.append(entry)
-    EVAL_LOG_PATH.write_text(json.dumps(log, indent=2), encoding="utf-8")
+def _write_to_db(entry: dict) -> None:
+    db.insert_eval_result(
+        timestamp=entry["timestamp"],
+        case_name=entry["case"],
+        scenario=entry["scenario"],
+        description=entry["description"],
+        layer_a=entry["layer_a"],
+        layer_a_passed=entry["layer_a_passed"],
+        layer_b=entry["layer_b"],
+        action_plan=entry["action_plan"],
+        guardrail_trips=entry["guardrail_trips"],
+        error=entry["error"],
+    )
 
 
 def _print_case_report(serialized: dict) -> None:
@@ -177,16 +181,17 @@ async def _main_async(case_names: list[str] | None) -> bool:
     for case in cases:
         result = await _run_case_resilient(case)
         serialized = _serialize_result(result)
-        _append_to_eval_log(serialized)
+        _write_to_db(serialized)
         _print_case_report(serialized)
         all_passed = all_passed and serialized["layer_a_passed"]
 
-    print(f"\nEval results appended to {EVAL_LOG_PATH} ({len(cases)} case(s))")
+    print(f"\nEval results written to {db.DB_PATH} ({len(cases)} case(s))")
     return all_passed
 
 
 def main() -> None:
     load_dotenv()
+    db.init_db()
     parser = argparse.ArgumentParser(description="Run supply-chain agent evals.")
     parser.add_argument("cases", nargs="*", help="Case names to run (default: all).")
     args = parser.parse_args()

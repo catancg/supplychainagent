@@ -1,0 +1,144 @@
+# PRD — Phase 1: Guardrail Templates
+
+**Status:** Draft v2 (decisions finalized, ready for implementation)
+**Author:** Carlos (with Claude)
+**Depends on:** none
+**Type:** Phase 1 of the post-MVP roadmap. See `docs/feature.prd` for the base system this extends.
+
+---
+
+## 1. What this is
+
+Generalizes the two existing hardcoded guardrails (`agents/guardrails.py`) into a small, data-driven rule engine plus reusable "templates" (YAML rule sets) — so a new guardrail rule can be added by editing config, not writing Python, and the same engine could in principle be reused by a different agent/project.
+
+This is the smallest and lowest-risk of the five Phase 1 pieces: it's a refactor of already-working, already-tested code, not new functionality. The bar is "same behavior, differently organized, now demonstrably extensible" — not "more guardrails."
+
+---
+
+## 2. Today's behavior (the regression baseline)
+
+Read directly from `agents/guardrails.py`, precisely, since this is what the refactor must reproduce exactly:
+
+**`validate_action_plan(plan, world)`** — three trip types:
+- `invalid_quantity`: `qty` not a number, `<= 0`, or `> 100_000` (`MAX_REASONABLE_QTY`) → order dropped.
+- `unavailable_supplier`: `supplier` id not found in `world.suppliers`, or found but `available: false` → order dropped.
+- `over_budget`: sum of kept orders' `est_cost` exceeds `world.budget_per_cycle` → **whole plan rejected** (`ok: False`), not just clamped.
+
+**`sanitize_untrusted_tool_output`** — for tool names in `{"search_policy", "get_fx_rate"}`, wraps the response in an `untrusted_reference_data` envelope and runs `neutralize_injection` (5 regex patterns: "ignore ... instructions", "disregard ... instructions/rules", "you are now", "system prompt", "new instructions:") over every string value, recursively through lists/dicts.
+
+Every existing test in `tests/test_guardrails.py` encodes this exact behavior and must still pass unchanged.
+
+---
+
+## 3. Design
+
+### `GuardrailRule` — the unit of configuration
+
+```python
+class GuardrailRule(BaseModel):
+    name: str
+    type: Literal[
+        "budget_cap",
+        "supplier_availability",
+        "quantity_range",
+        "injection_pattern",
+    ]
+    params: dict[str, Any]
+```
+
+Each `type` maps to one handler function in a small registry:
+
+```python
+RULE_HANDLERS: dict[str, Callable[[GuardrailRule, dict, dict], list[GuardrailTrip]]] = {
+    "budget_cap": _check_budget_cap,
+    "supplier_availability": _check_supplier_availability,
+    "quantity_range": _check_quantity_range,
+    "injection_pattern": _check_injection_pattern,  # used on text, not a plan — see below
+}
+```
+
+Note two of these rule types operate on the **plan** (`budget_cap`, `supplier_availability`, `quantity_range` — replacing `validate_action_plan`'s three checks 1:1) and one operates on **arbitrary text** (`injection_pattern` — replacing `neutralize_injection`'s hardcoded regex list). The engine has one entry point per shape:
+
+```python
+def evaluate_plan_rules(rules: list[GuardrailRule], plan: dict, world: dict) -> tuple[dict, list[GuardrailTrip]]:
+    """Returns (cleaned_plan, trips) — same contract as today's validate_action_plan."""
+
+def neutralize_text(rules: list[GuardrailRule], text: str) -> str:
+    """Applies all injection_pattern rules' regexes to text — same contract as today's neutralize_injection."""
+```
+
+### `GuardrailTemplate` — a named, ordered rule set
+
+```yaml
+# guardrails/templates/default.yaml
+name: default
+rules:
+  - name: budget_cap
+    type: budget_cap
+    params: {}                      # reads world.budget_per_cycle directly, no params needed
+  - name: supplier_availability
+    type: supplier_availability
+    params: {}
+  - name: quantity_range
+    type: quantity_range
+    params: {min: 1, max: 100000}   # reproduces MAX_REASONABLE_QTY as data
+  - name: prompt_injection
+    type: injection_pattern
+    params:
+      patterns:
+        - 'ignore (all |any )?(previous|prior|above) instructions'
+        - 'disregard (all |any )?(previous|prior|above) (instructions|rules)'
+        - 'you are now\b'
+        - 'system prompt'
+        - 'new instructions?:'
+```
+
+Loaded via a small `load_template(path) -> GuardrailTemplate` (YAML → Pydantic), cached at module import time — no hot-reloading needed for Phase 1.
+
+### Backward-compatible wrappers
+
+`agents/guardrails.py`'s existing public functions become thin wrappers loading `default.yaml` and delegating to the engine:
+
+```python
+_DEFAULT_TEMPLATE = load_template(TEMPLATES_DIR / "default.yaml")
+
+def validate_action_plan(plan: dict, world: dict) -> dict:
+    cleaned, trips = evaluate_plan_rules(_DEFAULT_TEMPLATE.rules, plan, world)
+    over_budget = any(t.type == "over_budget" for t in trips)
+    return {"ok": not over_budget, "plan": cleaned, "trips": [t.model_dump() for t in trips]}
+
+def neutralize_injection(text: str) -> str:
+    return neutralize_text(_DEFAULT_TEMPLATE.rules, text)
+```
+
+`enforce_action_plan_guardrails` and `sanitize_untrusted_tool_output` (the ADK callback wiring) don't change at all — they already call `validate_action_plan`/`neutralize_injection`, which keep their exact signatures and return shapes. This is the key design constraint: **the refactor is invisible above the wrapper functions.**
+
+---
+
+## 4. Proving it actually generalizes
+
+Config-only extensibility needs to be demonstrated, not just asserted. Add **one new rule** to `default.yaml` (or a second template file) that didn't exist before, purely by editing YAML — e.g. a `quantity_range` rule with a tighter `max` for a specific high-risk category, or a new `injection_pattern` entry catching a phrase not in today's list. A test asserts the new rule trips correctly with zero Python changes beyond the generic engine itself.
+
+---
+
+## 5. Explicitly not doing
+
+- Not building a general policy-as-code DSL (no conditionals/expressions in `params` — each rule `type` is a fixed, purpose-built check, not an arbitrary expression evaluator). Over-engineering risk flagged and deliberately avoided.
+- Not adding new guardrail *categories* beyond what's listed in §3 (no rate limiting, no PII detection) — Phase 1 scoping explicitly chose "templatize what exists" over "add more guardrail types," per the grilling conversation.
+- Not per-scenario or per-agent template selection — one `default.yaml`, loaded once. The architecture supports multiple named templates (the `GuardrailTemplate.name` field exists for this) but nothing switches between them yet.
+
+---
+
+## 6. Acceptance criteria
+
+- **All existing tests in `tests/test_guardrails.py` pass unchanged** — this is the hard regression gate, not a nice-to-have.
+- `default.yaml` reproduces today's exact 4 checks (3 plan rules + 1 injection-pattern rule) with no behavior drift.
+- A new rule added via YAML alone (§4) is demonstrated working, with a test.
+- `agents/guardrails.py`'s public function signatures (`validate_action_plan`, `neutralize_injection`, `enforce_action_plan_guardrails`, `sanitize_untrusted_tool_output`) are unchanged — nothing importing these needs to change.
+
+---
+
+## 7. Decisions
+
+1. **YAML confirmed** as the template format — adds `pyyaml` as a new dependency.
+2. **`guardrails/` as a new top-level package** (templates + engine), separate from `agents/guardrails.py` (which becomes the thin ADK-callback-wiring layer) — no objection, proceeding with the split.

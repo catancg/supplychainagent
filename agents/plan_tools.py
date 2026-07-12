@@ -1,22 +1,22 @@
 """read_recommendations / emit_action_plan — the supervisor's reconciliation
-and persistence tools (docs/feature.prd §5, §9). Guardrail enforcement runs
-as a before_tool_callback on emit_action_plan (see guardrails.py); by the
-time this tool body runs, purchase_orders have already been clamped and
+tool (docs/feature.prd §5, §9). Guardrail enforcement runs as a
+before_tool_callback on emit_action_plan (see guardrails.py); by the time
+this tool body runs, purchase_orders have already been clamped and
 state["guardrail_trips"] is already set.
+
+Persistence is a separate step, not this tool's job: after emit_action_plan
+returns status "ok", the supervisor calls the write_action_plan MCP tool
+(mcp_server/log_store.py) with this tool's own return values, per
+docs/phase1-db-mcp.prd — MCP is for agent-initiated writes, so persistence
+lives one level up, at the point the LLM actually decides to log the plan.
 """
 
 from __future__ import annotations
-
-import json
-from datetime import datetime, timezone
-from pathlib import Path
 
 import pydantic
 from google.adk.tools import ToolContext
 
 from agents.schemas import ActionPlan, PurchaseOrder
-
-ACTION_LOG_PATH = Path(__file__).resolve().parent.parent / "action_log.json"
 
 
 def read_recommendations(tool_context: ToolContext) -> dict:
@@ -29,21 +29,10 @@ def read_recommendations(tool_context: ToolContext) -> dict:
     }
 
 
-def _append_to_action_log(entry: dict) -> None:
-    log = []
-    if ACTION_LOG_PATH.exists():
-        try:
-            log = json.loads(ACTION_LOG_PATH.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            log = []
-    log.append(entry)
-    ACTION_LOG_PATH.write_text(json.dumps(log, indent=2), encoding="utf-8")
-
-
 def emit_action_plan(
     purchase_orders: list[PurchaseOrder], rationale: str, tool_context: ToolContext
 ) -> dict:
-    """Validates the ActionPlan and appends it (with any guardrail trips) to the action log.
+    """Validates the ActionPlan and writes it to state.
 
     Args:
         purchase_orders: proposed orders.
@@ -62,12 +51,10 @@ def emit_action_plan(
     tool_context.state["action_plan"] = plan_dict
 
     world = tool_context.state.get("world", {})
-    _append_to_action_log(
-        {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "situation": world.get("situation"),
-            "action_plan": plan_dict,
-            "guardrail_trips": tool_context.state.get("guardrail_trips", []),
-        }
-    )
-    return {"status": "ok", "action_plan": plan_dict}
+    guardrail_trips = tool_context.state.get("guardrail_trips", [])
+    return {
+        "status": "ok",
+        "action_plan": plan_dict,
+        "situation": world.get("situation"),
+        "guardrail_trips": guardrail_trips,
+    }

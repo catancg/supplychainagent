@@ -1,0 +1,86 @@
+# PRD — Phase 1: A2A Protocol Demo
+
+**Status:** Draft v2 (decisions finalized, ready for implementation)
+**Author:** Carlos (with Claude)
+**Depends on:** none
+**Type:** Phase 1 of the post-MVP roadmap. See `docs/feature.prd` for the base system this extends.
+
+---
+
+## 1. What this is
+
+Demonstrates the Agent2Agent (A2A) protocol — one agent exposed as an A2A service, a second agent calling it as a remote peer — as a **standalone demo, decoupled from the main supervisor pipeline.**
+
+Scoping recap: this was explicitly scoped as "a generic simulated peer for demo purposes" during Phase 1 planning — no specific domain role, no requirement that it affect the actual action plan. That decision drives everything below: build it to prove the protocol mechanics work, don't wire it into the tested, working supervisor→specialists→plan flow and risk destabilizing it.
+
+---
+
+## 2. Why decoupled, not wired into the supervisor
+
+Wiring a remote A2A call into the supervisor's flow (e.g. "ask a partner org's agent for their lead-time estimate before finalizing the plan") would touch a pipeline that already has 12 passing eval cases and a guardrail-gated commit path. A network call to a second local process adds a new failure mode (that process not running, a timeout, a malformed response) to a flow that doesn't need it to demonstrate A2A. Given the "no domain role" framing, there's no requirement forcing that risk. A separate demo path proves the same protocol mechanics with zero blast radius on the existing system.
+
+If this demo goes well and there's appetite to actually integrate it later, that's a distinct follow-on decision — not assumed here.
+
+---
+
+## 3. Technical basis (verified against the installed package)
+
+```python
+# google.adk.a2a.utils.agent_to_a2a
+def to_a2a(
+    agent: BaseAgent | Workflow, *,
+    host: str = "localhost", port: int = 8000, protocol: str = "http",
+    agent_card: AgentCard | str | None = None, ...
+) -> Starlette
+```
+Converts any ADK agent into a Starlette ASGI app — servable with `uvicorn`, same deployment shape as the FastAPI webapp.
+
+```python
+# google.adk.agents.remote_a2a_agent
+class RemoteA2aAgent(BaseAgent):
+    def __init__(self, name: str, agent_card: AgentCard | str, ...): ...
+```
+`agent_card` accepts a URL to the remote agent's card JSON (served automatically by `to_a2a` at the well-known path). Requires the **`google-adk[a2a]` extra** — not currently a dependency, not currently installed (confirmed: `import a2a` fails on the current environment).
+
+---
+
+## 4. Design
+
+### The peer agent
+A minimal, standalone ADK `Agent` — `a2a_demo/peer_agent.py` — with a light fictional persona ("partner-logistics-org's agent") and one or two trivial tools, e.g. `get_partner_lead_time_estimate(region: str) -> dict` returning a synthetic, deterministic number (same spirit as `mcp_server/market_data.py`'s synthetic-but-deterministic FX rate — no real external dependency, just enough substance to make the exchange meaningful rather than a bare ping/echo).
+
+Exposed via:
+```python
+# a2a_demo/serve_peer.py
+app = to_a2a(peer_agent, host="localhost", port=8001)
+```
+Run with `uv run uvicorn a2a_demo.serve_peer:app --port 8001` — a second local process, same pattern as the MCP server being a separate process from the main agent.
+
+### The caller
+A small standalone script (or a new webapp route, see open questions) — `a2a_demo/call_peer.py` — constructs a `RemoteA2aAgent` pointed at `http://localhost:8001/.well-known/agent-card.json`, wraps it in a minimal local agent/runner, sends one demo message, and prints the round-trip. Proves: agent card resolution, HTTP transport, message conversion — the actual protocol mechanics — all working end-to-end between two separate processes.
+
+---
+
+## 5. Explicitly not doing
+
+- Not wired into `supervisor_agent.py` or the procurement flow (see §2).
+- Not affecting `ActionPlan`, guardrails, or any eval case.
+- No real cross-organization concept — "partner-logistics-org" is flavor text on an otherwise generic demo, not a modeled business relationship.
+- No deployment story beyond local processes (both sides run on localhost, like the MCP server).
+
+---
+
+## 6. Acceptance criteria
+
+- `uv run uvicorn a2a_demo.serve_peer:app --port 8001` starts cleanly and serves an agent card at the well-known path.
+- `uv run python -m a2a_demo.call_peer` (with the peer already running) successfully round-trips a message and prints the peer's response.
+- Works as two independently-startable processes, documented in `README.md` (a new "A2A demo" section, same style as the existing MCP-server-standalone instructions).
+- Existing test suite and eval harness completely unaffected — this is purely additive.
+
+---
+
+## 7. Decisions
+
+1. **CLI-only demo for the first cut** — confirmed, per proposal (a). A webapp page (option b) stays a possible low-risk follow-on, not built now.
+2. **Persona**: no objection raised — proceeding with "partner-logistics-org" + a lead-time-estimate tool as proposed.
+3. **`google-adk[a2a]` as a new dependency**: proceeding — inherent to doing A2A at all; will sanity-check what it pulls in transitively during implementation, not a blocker.

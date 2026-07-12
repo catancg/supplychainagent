@@ -10,6 +10,7 @@ it's logged.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from google.adk.agents import Agent
 from google.adk.agents.callback_context import CallbackContext
@@ -17,6 +18,9 @@ from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.apps import App
 from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.tools import AgentTool
+from google.adk.tools.mcp_tool import McpToolset
+from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
+from mcp import StdioServerParameters
 
 from agents.demand_agent import create_demand_agent
 from agents.guardrails import enforce_action_plan_guardrails
@@ -27,6 +31,7 @@ from agents.procurement_agent import create_procurement_agent
 from loader import load_scenario_into_state
 from tools.world_tools import get_world_snapshot
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_SCENARIO = os.environ.get("SCENARIO_PATH", "demand_spike")
 
 INSTRUCTION = """
@@ -55,6 +60,12 @@ A scenario is already loaded into state["world"] (current situation:
    explains the reconciliation, citing the actual budget_per_cycle number and
    the total cost of your plan. If the plan is rejected (over budget), revise
    quantities/orders and call it again.
+6. If emit_action_plan returned status "ok", call write_action_plan (the MCP
+   tool) to persist the plan, using EXACTLY the situation, purchase_orders,
+   rationale, and guardrail_trips fields from emit_action_plan's own result —
+   don't reconstruct these values yourself, copy them through. Skip this
+   step entirely if emit_action_plan returned an error or rejection; only a
+   successfully emitted plan gets persisted.
 
 Write a short, honest rationale — cite what each specialist found and which
 policy-backed tradeoffs you made.
@@ -73,6 +84,17 @@ def create_supervisor_agent() -> Agent:
     inventory_agent = create_inventory_agent()
     procurement_agent = create_procurement_agent()
 
+    log_store_toolset = McpToolset(
+        connection_params=StdioConnectionParams(
+            server_params=StdioServerParameters(
+                command="uv",
+                args=["run", "python", "-m", "mcp_server.log_store"],
+                cwd=str(REPO_ROOT),
+            ),
+        ),
+        tool_filter=["write_action_plan"],
+    )
+
     return Agent(
         name="supervisor_agent",
         model=os.environ.get("SUPERVISOR_MODEL", "gemini-flash-latest"),
@@ -85,6 +107,7 @@ def create_supervisor_agent() -> Agent:
             AgentTool(agent=procurement_agent),
             read_recommendations,
             emit_action_plan,
+            log_store_toolset,
         ],
         before_agent_callback=_load_default_scenario,
         before_tool_callback=enforce_action_plan_guardrails,

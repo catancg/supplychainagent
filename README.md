@@ -30,6 +30,13 @@ See `docs/feature.prd` §13. In short:
   embeddings).
 - `mcp_server/market_data.py` — a local MCP server (stdio) exposing
   `get_fx_rate`, used by the procurement agent.
+- `mcp_server/log_store.py` — a second local MCP server exposing
+  `write_action_plan`, used by the supervisor to persist an accepted plan to
+  `data/supply_agents.db` (via `db.py`). See `docs/phase1-db-mcp.prd`.
+- `db.py` — the shared SQLite log store (`action_plans`, `eval_results`
+  tables). Only agent-initiated writes go through MCP (`write_action_plan`,
+  above); our own deterministic code (`evals/run_evals.py`, the webapp's
+  history page) reads/writes the same DB directly, no MCP round-trip.
 - `agents/` — the three specialists, the supervisor, Pydantic schemas, and
   guardrails. `agents/__init__.py` exposes `app` (the supervisor wrapped with
   the token-usage plugin and context caching — see `agents/observability.py`
@@ -107,22 +114,24 @@ Open http://127.0.0.1:8000. Three pages:
   simple over building SSE/WebSocket streaming for a first version). Retries
   transient failures (Gemini 503s) up to twice before showing an error page
   with a retry button.
-- **History** (`/history`) — every persisted `action_log.json` /
-  `eval_log.json` entry, newest first, full JSON behind a `<details>` toggle
-  (no JS needed).
+- **History** (`/history`) — every persisted `action_plans` / `eval_results`
+  row from `data/supply_agents.db`, newest first, full JSON behind a
+  `<details>` toggle (no JS needed).
 
 Requires `GOOGLE_API_KEY` — clicking "Run" makes real Gemini calls, same as
 `adk run`/`adk web`.
 
-### 4. Run the MCP server standalone (sanity check)
+### 4. Run an MCP server standalone (sanity check)
 
 ```bash
-uv run python -m mcp_server.market_data
+uv run python -m mcp_server.market_data   # get_fx_rate — read-only
+uv run python -m mcp_server.log_store     # write_action_plan — persists to data/supply_agents.db
 ```
 
-Runs over stdio and blocks waiting for an MCP client — Ctrl+C to stop. In
-normal use, the procurement agent launches this automatically as a subprocess
-via `McpToolset`.
+Each runs over stdio and blocks waiting for an MCP client — Ctrl+C to stop.
+In normal use, the procurement agent launches `market_data` and the
+supervisor launches `log_store`, each as its own subprocess via `McpToolset`
+(docs/phase1-db-mcp.prd).
 
 ### 5. Unit tests (deterministic tools + guardrail validator + webapp routes)
 
@@ -183,5 +192,9 @@ the expected behavior in prose.
   prompt-injection phrases (`agents/guardrails.py::sanitize_untrusted_tool_output`)
   before reaching the model.
 
-Every accepted (or rejected) plan, plus any guardrail trips, is appended to
-`action_log.json` (git-ignored — it's a run artifact, not source).
+Every **accepted** plan, plus any guardrail trips, is persisted to
+`data/supply_agents.db` (git-ignored — it's a run artifact, not source) —
+the supervisor calls the `write_action_plan` MCP tool
+(`mcp_server/log_store.py`) after a successful `emit_action_plan`. Rejected
+(over-budget) plans are not persisted, matching the guardrail's own
+short-circuit: a rejected plan never reaches a state worth logging.

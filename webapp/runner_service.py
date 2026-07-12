@@ -1,6 +1,7 @@
 """Service layer behind the FastAPI routes — scenario listing/detail, a
 synchronous "run this scenario and capture the full trace" operation, and
-readers for the action_log.json / eval_log.json run-history artifacts.
+readers for the persistent log store (data/supply_agents.db, via db.py —
+see docs/phase1-db-mcp.prd).
 
 Kept separate from webapp/main.py so the HTTP layer stays thin and this
 logic is testable/reusable on its own (e.g. from a script or notebook).
@@ -9,23 +10,18 @@ logic is testable/reusable on its own (e.g. from a script or notebook).
 from __future__ import annotations
 
 import asyncio
-import json
 import time
-from pathlib import Path
 from typing import Any
 
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
+import db
 from agents.observability import TraceCollectorPlugin
 from agents.supervisor_agent import create_app
 from evals.cases import CASES
 from loader import list_scenarios, load_scenario
-
-REPO_ROOT = Path(__file__).resolve().parent.parent
-ACTION_LOG_PATH = REPO_ROOT / "action_log.json"
-EVAL_LOG_PATH = REPO_ROOT / "eval_log.json"
 
 APP_NAME = "supply_agents_webapp"
 USER_ID = "webapp_user"
@@ -34,14 +30,7 @@ RETRY_BACKOFF_SECONDS = 10
 
 _CASE_BY_SCENARIO = {c.scenario: c for c in CASES}
 
-
-def _read_json_log(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return []
+db.init_db()
 
 
 def list_scenario_summaries() -> list[dict[str, Any]]:
@@ -159,8 +148,8 @@ async def _run_scenario_once(scenario_id: str) -> dict[str, Any]:
 
 
 def load_action_log() -> list[dict]:
-    return list(reversed(_read_json_log(ACTION_LOG_PATH)))
+    return db.list_action_plans()
 
 
 def load_eval_log() -> list[dict]:
-    return list(reversed(_read_json_log(EVAL_LOG_PATH)))
+    return db.list_eval_results()

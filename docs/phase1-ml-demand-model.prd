@@ -1,0 +1,95 @@
+# PRD — Phase 1: ML Demand Forecasting Model
+
+**Status:** Draft v2 (decisions finalized, ready for implementation)
+**Author:** Carlos (with Claude)
+**Depends on:** none
+**Type:** Phase 1 of the post-MVP roadmap. See `docs/feature.prd` for the base system this extends.
+
+---
+
+## 1. What this is
+
+Replaces `forecast_demand`'s hand-rolled weighted-average arithmetic (`0.4 * historical_avg + 0.6 * recent_avg`) with a real, trained regression model, wired into `demand_agent` as a tool. This is the one piece of Phase 1 that's genuinely open-ended — the other four have a fairly mechanical shape (swap a session service, add an MCP server, template an existing rule set, demo a protocol); this one requires actually deciding what to predict and how to train it.
+
+Scoped for a **learning project**, not production MLOps: a small, explainable model, a synthetic-data generator we control, and a training script — not a full feature store or retraining pipeline.
+
+---
+
+## 2. What the model predicts
+
+**Next-period demand (regression)** for a single SKU, from its recent demand history — i.e. a drop-in replacement for `forecast_demand`'s `forecast_daily_demand` output, not a new capability. `is_spike` stays a simple threshold check on the model's output vs. the historical average (unchanged logic from today — no separate classifier needed just to flag spikes; that would be scope creep for what's fundamentally still "how much will we sell next").
+
+### Features (per SKU, per prediction)
+Derived from `recent_demand` (currently 6 trailing daily values) plus `category`:
+- Lag features: `demand[t-1]`, `demand[t-2]`, ... (all 6 available lags)
+- Rolling stats: trailing mean, trailing std/volatility, min, max
+- `recent_avg / historical_avg` ratio (the same spike signal the current tool already computes)
+- `category` (major_appliance / small_item) — one-hot or a simple binary flag
+
+### Target
+`demand[t+1]` (next day's actual demand) — a single-step-ahead regression.
+
+---
+
+## 3. Synthetic training data
+
+New script `ml/generate_training_data.py`. The scenario fixtures alone (10 SKUs × a handful of files) are far too little data to train anything — need a purpose-built generator, separate from `scenarios/*.json`:
+
+- Simulate many synthetic SKU demand series (hundreds to low thousands), each a sequence of daily values, generated from a mix of:
+  - A baseline level (varies by synthetic "category")
+  - Gaussian noise
+  - Occasional injected spikes (controlled probability + magnitude, matching the kind of spike our `demand_spike*` scenarios model) — so the model actually learns what a spike looks like, not just steady-state noise
+  - Optional mild trend/seasonality (simple sine component) — adds realism without much complexity
+- Output: a flat CSV/parquet of `(lag features..., category, target)` rows, written to `ml/data/synthetic_demand.csv` (git-ignored — regenerable, not source, same treatment as `chroma_data/`).
+
+This generator is itself deterministic given a fixed random seed, so training is reproducible from a clean checkout (`uv run python -m ml.generate_training_data && uv run python -m ml.train_demand_model`).
+
+---
+
+## 4. Model & training
+
+- **Library:** scikit-learn (new dependency — small, no GPU/heavy-ML-framework needed for this scale).
+- **Model type:** start with `GradientBoostingRegressor` or `RandomForestRegressor` — handles the lag/rolling features and the category split without manual feature scaling, and is a reasonable default for small tabular data. A plain `Ridge`/`LinearRegression` is the fallback if the tree model overfits on this little data (worth trying both in the training script and picking whichever validates better — not a big deal either way given the modest scope).
+- **Training script:** `ml/train_demand_model.py` — loads the synthetic CSV, does a train/test split, fits the model, reports MAE/RMSE on the held-out split (printed, not gated — no CI-blocking accuracy threshold for a learning project), and serializes the fitted model to `ml/models/demand_forecast.joblib` via `joblib.dump`.
+- **Committing the model file:** the trained `.joblib` file is small (a handful of trees, ~10 features) — commit it to the repo rather than git-ignoring it, so the tool works out of the box after `git clone` + `uv sync` without requiring a training step first. The generator + training scripts stay available for anyone who wants to regenerate it.
+
+---
+
+## 5. Tool integration
+
+Per the replace-outright decision (§8.3), `forecast_demand` and `forecast_demand_for_all_skus` in `tools/demand_tools.py` **keep their names and signatures** — no new tool name, no `demand_agent`/instruction changes needed. Only the implementation behind them changes: instead of the fixed `0.4 * historical_avg + 0.6 * recent_avg` formula, they load the trained model from `ml/models/demand_forecast.joblib` (via a small loader in the new `ml/` package) and predict from it.
+
+```python
+# tools/demand_tools.py — signature unchanged, body now calls into ml/
+def forecast_demand(sku: str, tool_context: ToolContext) -> dict: ...
+```
+
+Same output shape as today (`forecast_daily_demand`, `historical_avg_daily_demand`, `spike_ratio`, `is_spike`) so `demand_agent`'s downstream logic and the `DemandOutlook` schema don't need to change — only the computation behind `forecast_daily_demand` changes, from a fixed formula to a model prediction.
+
+**Fallback for resilience:** if the model file is missing or fails to load (e.g. a fresh checkout where someone deleted `ml/models/`), fall back to the existing trailing-average calculation rather than raising — consistent with this project's established pattern of tools failing soft, not hard (see `agents/state_tools.py`'s validation-error handling for the same philosophy).
+
+**Batch variant:** `forecast_demand_for_all_skus` gets the same treatment (ML-backed), preserving the batch-call pattern that was specifically added earlier to keep `demand_agent`'s tool-call count low.
+
+---
+
+## 6. Critical regression risk
+
+Swapping the forecasting mechanism can change `is_spike` behavior on the **existing, already-passing** scenarios and eval cases — `demand_spike`, `demand_spike_small_item`, `demand_gradual_no_spike`-style cases specifically depend on the forecast correctly flagging (or not flagging) a spike. This is not optional to check — it's the acceptance bar.
+
+---
+
+## 7. Acceptance criteria
+
+- `uv run python -m ml.generate_training_data` and `uv run python -m ml.train_demand_model` run from a clean checkout and produce a model file + printed MAE/RMSE.
+- `forecast_demand_ml` unit-tested against known synthetic inputs (not just "it runs" — assert specific expected-direction behavior, e.g. a clear upward-spiking series predicts higher than a flat series).
+- **All 12 existing scenarios still produce the same `is_spike` classification** as today's trailing-average tool, when run through the eval harness — if the ML model disagrees with the heuristic on any scenario, that's a finding to resolve (tune the model, adjust the spike threshold, or keep the heuristic as a sanity-check overlay), not something to silently accept.
+- `demand_agent`'s existing tests/eval cases pass unchanged after the swap.
+- Fallback-to-heuristic path is tested (simulate a missing/corrupt model file).
+
+---
+
+## 8. Decisions
+
+1. **Target confirmed: next-day demand regression**, as scoped in §2.
+2. **File layout**: top-level `ml/` package, as proposed — no preference expressed, going with the original recommendation.
+3. **`forecast_demand` is replaced outright** (not kept alongside the ML version) — confirmed.
