@@ -15,6 +15,7 @@ from google.adk.agents import Agent
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.context_cache_config import ContextCacheConfig
 from google.adk.apps import App
+from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.tools import AgentTool
 
 from agents.demand_agent import create_demand_agent
@@ -90,14 +91,16 @@ def create_supervisor_agent() -> Agent:
     )
 
 
-def create_app(name: str = "agents") -> App:
+def create_app(name: str = "agents", extra_plugins: list[BasePlugin] | None = None) -> App:
     """Wraps the supervisor in an App with the token-usage plugin and context
-    caching enabled — shared by agents/__init__.py (adk web/run) and
-    evals/run_evals.py so both execution paths behave identically.
+    caching enabled — shared by agents/__init__.py (adk web/run),
+    evals/run_evals.py, and webapp/runner_service.py so all execution paths
+    behave identically. Pass extra_plugins for per-run additions (e.g. the
+    webapp's TraceCollectorPlugin, which needs a fresh instance per request).
     """
     return App(
         name=name,
         root_agent=create_supervisor_agent(),
-        plugins=[TokenUsagePlugin()],
+        plugins=[TokenUsagePlugin(), *(extra_plugins or [])],
         context_cache_config=ContextCacheConfig(min_tokens=4096),
     )

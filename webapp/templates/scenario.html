@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}{{ id }} — Supply Chain Agent{% endblock %}
+{% block content %}
+  <p><a href="/">← All scenarios</a></p>
+  <h1>{{ id }} <span class="badge">{{ world.situation }}</span></h1>
+  {% if description %}<p class="card-desc">{{ description }}</p>{% endif %}
+
+  <form method="post" action="/scenarios/{{ id }}/run" id="run-form">
+    <button type="submit" id="run-btn">Run supervisor + specialists on this scenario</button>
+    <span id="run-status" class="muted"></span>
+  </form>
+
+  <h2>Budget</h2>
+  <p>{{ "{:,}".format(world.budget_per_cycle) }} per cycle</p>
+
+  <h2>SKUs</h2>
+  <table>
+    <thead>
+      <tr><th>SKU</th><th>Name</th><th>Category</th><th>Recent demand</th>
+          {% for w in world.warehouses %}<th>{{ w.id }} on-hand</th>{% endfor %}</tr>
+    </thead>
+    <tbody>
+      {% for sku in world.skus %}
+      <tr>
+        <td><code>{{ sku.id }}</code></td>
+        <td>{{ sku.name }}</td>
+        <td>{{ sku.category }}</td>
+        <td>{{ sku.recent_demand }}</td>
+        {% for w in world.warehouses %}<td>{{ sku.inventory.get(w.id, "—") }}</td>{% endfor %}
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <h2>Suppliers</h2>
+  <table>
+    <thead><tr><th>Supplier</th><th>SKUs covered</th><th>Unit cost</th><th>Currency</th><th>Lead time (days)</th><th>Reliability</th><th>Available</th></tr></thead>
+    <tbody>
+      {% for s in world.suppliers %}
+      <tr class="{{ 'row-flag' if not s.available else '' }}">
+        <td><code>{{ s.id }}</code></td>
+        <td>{{ s.skus | join(", ") }}</td>
+        <td>{{ s.unit_cost }}</td>
+        <td>{{ s.currency }}</td>
+        <td>{{ s.lead_time_days }}</td>
+        <td>{{ s.reliability }}</td>
+        <td>{{ "✓" if s.available else "✗ unavailable" }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <script>
+    document.getElementById("run-form").addEventListener("submit", function () {
+      document.getElementById("run-btn").disabled = true;
+      document.getElementById("run-status").textContent = " Running... this takes 1-2 minutes (live Gemini calls).";
+    });
+  </script>
+{% endblock %}

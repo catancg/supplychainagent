@@ -36,6 +36,13 @@ See `docs/feature.prd` §13. In short:
   and `agents/supervisor_agent.py::create_app`) for `adk web`.
 - `evals/` — the eval harness (Layer A deterministic assertions + Layer B
   LLM-as-judge) over all 12 scenarios.
+- `webapp/` — a small FastAPI app (Jinja2 templates, no JS build step) that's
+  a purpose-built alternative to `adk web`: browse scenarios, trigger a live
+  run, and see the full trace (every tool call/result across the supervisor
+  *and* all three specialists — `adk web`'s own event view can't show nested
+  `AgentTool` sub-runs; this uses a plugin instead, see
+  `agents/observability.py::TraceCollectorPlugin`) plus the final plan and
+  run history.
 
 ## Run it
 
@@ -66,7 +73,48 @@ To try a different scenario, just ask the supervisor, e.g.:
 build auto-loads on first turn only; switching scenarios mid-session isn't
 wired as a tool yet (see docs/feature.prd's open questions).
 
-### 3. Run the MCP server standalone (sanity check)
+### 3. Web UI (purpose-built alternative to `adk web`)
+
+```bash
+uv run uvicorn webapp.main:app --reload
+```
+
+Open http://127.0.0.1:8000. Three pages:
+
+- **Scenarios** (`/`) — a card per scenario (SKU/warehouse/supplier counts,
+  budget, any unavailable suppliers flagged, and the matching eval case's
+  expected-behavior description if one exists) plus the 5 most recent
+  action-log/eval-log entries.
+- **Scenario detail** (`/scenarios/{id}`) — full SKU and supplier tables for
+  that world, and a "Run" button.
+- **Result** (after clicking Run) — the complete trace (every tool call and
+  result, every resulting `state[...]` change, and every model text response,
+  across the supervisor *and* all three specialists, in chronological order
+  with elapsed time), the final recommendations per specialist, the action
+  plan, and any guardrail trips. Two things are specifically highlighted:
+  - **State changes** — an amber `state changed by <tool>` entry appears
+    right after any tool call that mutated `session.state` (the `emit_*`
+    tools, `emit_action_plan`), showing exactly which key changed and its
+    before/after value. Read-only tools (the forecast/reorder/supplier-cost
+    calculators, `get_world_snapshot`) never produce one.
+  - **RAG usage** — `search_policy` calls/results get a cyan "RAG" badge and
+    tinted background, so retrieval-grounded reasoning is visually
+    distinguishable from plain deterministic tool calls or the MCP FX-rate
+    call.
+
+  Runs synchronously — a request takes ~1-2 minutes (real Gemini calls) and
+  the page just waits; there's no live-streaming trace, by design (kept
+  simple over building SSE/WebSocket streaming for a first version). Retries
+  transient failures (Gemini 503s) up to twice before showing an error page
+  with a retry button.
+- **History** (`/history`) — every persisted `action_log.json` /
+  `eval_log.json` entry, newest first, full JSON behind a `<details>` toggle
+  (no JS needed).
+
+Requires `GOOGLE_API_KEY` — clicking "Run" makes real Gemini calls, same as
+`adk run`/`adk web`.
+
+### 4. Run the MCP server standalone (sanity check)
 
 ```bash
 uv run python -m mcp_server.market_data
@@ -76,15 +124,18 @@ Runs over stdio and blocks waiting for an MCP client — Ctrl+C to stop. In
 normal use, the procurement agent launches this automatically as a subprocess
 via `McpToolset`.
 
-### 4. Unit tests (deterministic tools + guardrail validator)
+### 5. Unit tests (deterministic tools + guardrail validator + webapp routes)
 
 ```bash
 uv run pytest
 ```
 
-No API key needed — these test pure functions only.
+No API key needed — these test pure functions and the webapp's read-only
+routes only. `POST /scenarios/{id}/run` (which triggers a real, multi-minute,
+multi-dollar agent run) is deliberately not covered by the automated suite —
+verify that one manually.
 
-### 5. Evals
+### 6. Evals
 
 ```bash
 uv run python -m evals.run_evals            # all 12 cases

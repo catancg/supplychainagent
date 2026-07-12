@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+{% block title %}History — Supply Chain Agent{% endblock %}
+{% block content %}
+  <p><a href="/">← Scenarios</a></p>
+  <h1>History</h1>
+
+  <h2>Action log ({{ action_log | length }})</h2>
+  {% if action_log %}
+  {% for entry in action_log %}
+  <details class="log-entry">
+    <summary>
+      {{ entry.timestamp }} — <strong>{{ entry.situation }}</strong> —
+      {{ entry.action_plan.purchase_orders | length }} order(s),
+      cost {{ entry.action_plan.purchase_orders | sum(attribute="est_cost") }}
+      {% if entry.guardrail_trips %}<span class="badge badge-fail">{{ entry.guardrail_trips | length }} guardrail trip(s)</span>{% endif %}
+    </summary>
+    <pre>{{ entry | tojson(indent=2) }}</pre>
+  </details>
+  {% endfor %}
+  {% else %}
+  <p class="muted">No action log entries yet. Run a scenario from the home page.</p>
+  {% endif %}
+
+  <h2>Eval log ({{ eval_log | length }})</h2>
+  {% if eval_log %}
+  {% for entry in eval_log %}
+  <details class="log-entry">
+    <summary>
+      {{ entry.timestamp }} — <strong>{{ entry.case }}</strong> —
+      {% if entry.error %}<span class="badge badge-error">ERROR</span>
+      {% elif entry.layer_a_passed %}<span class="badge badge-pass">PASS</span>
+      {% else %}<span class="badge badge-fail">FAIL</span>{% endif %}
+    </summary>
+    <pre>{{ entry | tojson(indent=2) }}</pre>
+  </details>
+  {% endfor %}
+  {% else %}
+  <p class="muted">No eval log entries yet. Run <code>uv run python -m evals.run_evals</code>.</p>
+  {% endif %}
+{% endblock %}

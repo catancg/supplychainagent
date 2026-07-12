@@ -6,9 +6,114 @@ including nested specialist runs invoked via AgentTool.
 
 from __future__ import annotations
 
+import time
+from typing import Any
+
 from google.adk.agents.callback_context import CallbackContext
 from google.adk.models.llm_response import LlmResponse
 from google.adk.plugins.base_plugin import BasePlugin
+from google.adk.sessions.state import State
+from google.adk.tools.base_tool import BaseTool
+from google.adk.tools.tool_context import ToolContext
+
+# The one tool that grounds reasoning in the RAG policy corpus (docs/feature.prd
+# §7) — flagged in the trace so RAG usage is visually distinguishable from
+# plain deterministic tool calls.
+RAG_TOOLS = {"search_policy"}
+
+
+class TraceCollectorPlugin(BasePlugin):
+    """Builds a flat, chronological trace of a run for display in the webapp:
+    every tool call/result, every resulting state["rec:*"/"action_plan"/...]
+    change, and every model text response — across the whole agent tree.
+
+    Reuses the same mechanism as TokenUsagePlugin — plugin callbacks fire
+    across the whole agent tree, including nested specialist runs invoked via
+    AgentTool, which the top-level Runner.run_async() event stream does NOT
+    show (each AgentTool invocation runs its sub-agent in its own internal
+    Runner/session). A plugin is the only way to see everything in order.
+
+    State changes are detected by diffing a state snapshot taken immediately
+    before and after each tool call — every state mutation in this codebase
+    happens inside a tool (the emit_* tools, and the guardrail callback that
+    runs before emit_action_plan), so tool-level before/after is sufficient;
+    no separate agent-level bracketing is needed.
+    """
+
+    def __init__(self):
+        super().__init__(name="trace_collector")
+        self.trace: list[dict[str, Any]] = []
+        self._state_before: dict[str, dict] = {}
+
+    def _record(self, **entry: Any) -> None:
+        entry.setdefault("timestamp", time.time())
+        self.trace.append(entry)
+
+    @staticmethod
+    def _state_snapshot(tool_context: ToolContext) -> dict:
+        return {
+            k: v
+            for k, v in tool_context.state.to_dict().items()
+            if not k.startswith("_adk") and not k.startswith(State.TEMP_PREFIX)
+        }
+
+    @staticmethod
+    def _diff_state(before: dict, after: dict) -> list[dict]:
+        changes = []
+        for key in sorted(set(before) | set(after)):
+            b, a = before.get(key), after.get(key)
+            if b != a:
+                changes.append({"key": key, "before": b, "after": a})
+        return changes
+
+    async def before_tool_callback(
+        self, *, tool: BaseTool, tool_args: dict, tool_context: ToolContext
+    ) -> dict | None:
+        self._record(
+            type="tool_call",
+            agent=tool_context.agent_name,
+            tool=tool.name,
+            args=tool_args,
+            is_rag=tool.name in RAG_TOOLS,
+        )
+        self._state_before[tool_context.function_call_id] = self._state_snapshot(tool_context)
+        return None
+
+    async def after_tool_callback(
+        self, *, tool: BaseTool, tool_args: dict, tool_context: ToolContext, result: dict
+    ) -> dict | None:
+        self._record(
+            type="tool_result",
+            agent=tool_context.agent_name,
+            tool=tool.name,
+            result=result,
+            is_rag=tool.name in RAG_TOOLS,
+        )
+
+        before = self._state_before.pop(tool_context.function_call_id, {})
+        after = self._state_snapshot(tool_context)
+        changes = self._diff_state(before, after)
+        if changes:
+            self._record(
+                type="state_change",
+                agent=tool_context.agent_name,
+                tool=tool.name,
+                changes=changes,
+            )
+        return None
+
+    async def after_model_callback(
+        self, *, callback_context: CallbackContext, llm_response: LlmResponse
+    ) -> LlmResponse | None:
+        content = llm_response.content
+        if content is None or content.parts is None:
+            return None
+        text = "\n".join(
+            p.text for p in content.parts if getattr(p, "text", None) and not getattr(p, "thought", False)
+        )
+        if text:
+            self._record(type="model_text", agent=callback_context.agent_name, text=text)
+        return None
 
 
 class TokenUsagePlugin(BasePlugin):

@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Run failed — Supply Chain Agent{% endblock %}
+{% block content %}
+  <p><a href="/scenarios/{{ scenario_id }}">← {{ scenario_id }}</a></p>
+  <h1>Run failed</h1>
+  <p class="muted">
+    The agent run for <code>{{ scenario_id }}</code> failed even after retries. This is usually a
+    transient Gemini API issue (e.g. a 503 "high demand" error), not a problem with the scenario itself.
+  </p>
+  <pre>{{ error }}</pre>
+  <form method="post" action="/scenarios/{{ scenario_id }}/run">
+    <button type="submit">Retry</button>
+  </form>
+{% endblock %}

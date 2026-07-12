@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Result: {{ scenario }} — Supply Chain Agent{% endblock %}
+{% block content %}
+  <p><a href="/scenarios/{{ scenario }}">← {{ scenario }}</a></p>
+  <h1>{{ scenario }} <span class="badge">{{ situation }}</span></h1>
+  <p class="muted">Run completed in {{ duration_seconds }}s · {{ trace | length }} trace entries.</p>
+
+  {% if guardrail_trips %}
+  <div class="alert">
+    <strong>Guardrail trips:</strong>
+    <ul>{% for trip in guardrail_trips %}<li>{{ trip.type }}: {{ trip.detail }}</li>{% endfor %}</ul>
+  </div>
+  {% endif %}
+
+  <h2>Final action plan</h2>
+  <p><strong>Total cost:</strong> {{ action_plan.purchase_orders | sum(attribute="est_cost") }} / {{ "{:,}".format(world.budget_per_cycle) }} budget</p>
+  {% if action_plan.purchase_orders %}
+  <table>
+    <thead><tr><th>SKU</th><th>Supplier</th><th>Qty</th><th>Destination</th><th>Est. cost</th></tr></thead>
+    <tbody>
+      {% for o in action_plan.purchase_orders %}
+      <tr><td><code>{{ o.sku }}</code></td><td>{{ o.supplier }}</td><td>{{ o.qty }}</td><td>{{ o.dest_warehouse }}</td><td>{{ o.est_cost }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No purchase orders — nothing needed replenishment, or no valid supplier was available.</p>
+  {% endif %}
+  <p><strong>Rationale:</strong> {{ action_plan.rationale }}</p>
+
+  <h2>Specialist recommendations</h2>
+  <div class="two-col">
+    {% for domain in ["demand", "inventory", "procurement"] %}
+    <section>
+      <h3>{{ domain }}</h3>
+      {% if recommendations[domain] %}
+      <details>
+        <summary>{{ recommendations[domain].summary }}</summary>
+        <pre>{{ recommendations[domain] | tojson(indent=2) }}</pre>
+      </details>
+      {% else %}
+      <p class="muted">No recommendation recorded.</p>
+      {% endif %}
+    </section>
+    {% endfor %}
+  </div>
+
+  <h2>Trace</h2>
+  <p class="muted">
+    Every tool call/result, resulting <code>state</code> change, and model response, across the
+    supervisor and all three specialists, in chronological order.
+    <span class="legend-swatch legend-rag"></span> = RAG (<code>search_policy</code>) ·
+    <span class="legend-swatch legend-state_change"></span> = state change
+  </p>
+  <ol class="trace">
+    {% for entry in trace %}
+    <li class="trace-entry trace-{{ entry.type }}{{ ' trace-rag' if entry.is_rag else '' }}">
+      <span class="trace-time">t+{{ entry.elapsed }}s</span>
+      <span class="trace-agent">{{ entry.agent }}</span>
+      {% if entry.type == "tool_call" %}
+        <span class="trace-label">→ calls</span> <code>{{ entry.tool }}</code>
+        {% if entry.is_rag %}<span class="badge badge-rag">RAG</span>{% endif %}
+        {% if entry.args %}
+        <details><summary>args</summary><pre>{{ entry.args | tojson(indent=2) }}</pre></details>
+        {% endif %}
+      {% elif entry.type == "tool_result" %}
+        <span class="trace-label">← result of</span> <code>{{ entry.tool }}</code>
+        {% if entry.is_rag %}<span class="badge badge-rag">RAG</span>{% endif %}
+        <details><summary>result</summary><pre>{{ entry.result | tojson(indent=2) }}</pre></details>
+      {% elif entry.type == "state_change" %}
+        <span class="trace-label">✎ state changed by</span> <code>{{ entry.tool }}</code>
+        <ul class="state-diff">
+          {% for change in entry.changes %}
+          <li>
+            <code>state["{{ change.key }}"]</code>
+            <details>
+              <summary>before → after</summary>
+              <pre>{{ change.before | tojson(indent=2) }} →&#10;{{ change.after | tojson(indent=2) }}</pre>
+            </details>
+          </li>
+          {% endfor %}
+        </ul>
+      {% elif entry.type == "model_text" %}
+        <span class="trace-label">says:</span> {{ entry.text }}
+      {% endif %}
+    </li>
+    {% endfor %}
+  </ol>
+{% endblock %}

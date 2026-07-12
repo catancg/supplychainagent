@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Scenarios — Supply Chain Agent{% endblock %}
+{% block content %}
+  <h1>Scenarios</h1>
+  <p class="muted">Pick a scenario to inspect its world data, then run it through the supervisor + specialists and watch the trace.</p>
+
+  <div class="card-grid">
+    {% for s in scenarios %}
+    <a class="card" href="/scenarios/{{ s.id }}">
+      <div class="card-header">
+        <span class="card-title">{{ s.id }}</span>
+        <span class="badge">{{ s.situation }}</span>
+      </div>
+      {% if s.description %}<p class="card-desc">{{ s.description }}</p>{% endif %}
+      <div class="card-stats">
+        <span>{{ s.sku_count }} SKUs</span>
+        <span>{{ s.warehouse_count }} warehouses</span>
+        <span>{{ s.supplier_count }} suppliers</span>
+        <span>budget {{ "{:,}".format(s.budget_per_cycle) }}</span>
+      </div>
+      {% if s.unavailable_suppliers %}
+      <div class="card-flag" title="Part of this scenario's test setup, not an error">
+        Test condition — supplier(s) down: {{ s.unavailable_suppliers | join(", ") }}
+      </div>
+      {% endif %}
+    </a>
+    {% endfor %}
+  </div>
+
+  <h2>Recent runs</h2>
+  <div class="two-col">
+    <section>
+      <h3>Action log</h3>
+      {% if recent_action_log %}
+      <table>
+        <thead><tr><th>Timestamp</th><th>Situation</th><th>Orders</th><th>Total cost</th></tr></thead>
+        <tbody>
+          {% for entry in recent_action_log %}
+          <tr>
+            <td>{{ entry.timestamp }}</td>
+            <td>{{ entry.situation }}</td>
+            <td>{{ entry.action_plan.purchase_orders | length }}</td>
+            <td>{{ entry.action_plan.purchase_orders | sum(attribute="est_cost") }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="muted">No runs yet — trigger one from a scenario page.</p>
+      {% endif %}
+    </section>
+    <section>
+      <h3>Eval log</h3>
+      {% if recent_eval_log %}
+      <table>
+        <thead><tr><th>Timestamp</th><th>Case</th><th>Result</th></tr></thead>
+        <tbody>
+          {% for entry in recent_eval_log %}
+          <tr>
+            <td>{{ entry.timestamp }}</td>
+            <td>{{ entry.case }}</td>
+            <td>
+              {% if entry.error %}<span class="badge badge-error">ERROR</span>
+              {% elif entry.layer_a_passed %}<span class="badge badge-pass">PASS</span>
+              {% else %}<span class="badge badge-fail">FAIL</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p class="muted">No eval runs yet — run <code>uv run python -m evals.run_evals</code>.</p>
+      {% endif %}
+    </section>
+  </div>
+  <p><a href="/history">View full history →</a></p>
+{% endblock %}
