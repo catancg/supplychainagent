@@ -194,15 +194,24 @@ the expected behavior in prose.
 
 ## Guardrails, demonstrated
 
-- **Budget:** `agents/guardrails.py::validate_action_plan` rejects a plan
-  whose total cost exceeds `budget_per_cycle` — the supervisor must revise
-  and resubmit.
+- **Budget:** rejects a plan whose total cost exceeds `budget_per_cycle` —
+  the supervisor must revise and resubmit.
 - **Unavailable suppliers:** orders from an `available: false` supplier are
   clamped out of the plan before it's accepted.
 - **Untrusted content:** `search_policy` (RAG) and `get_fx_rate` (MCP)
   results are wrapped as reference-only data and scanned for obvious
   prompt-injection phrases (`agents/guardrails.py::sanitize_untrusted_tool_output`)
   before reaching the model.
+
+**Rule logic is config-driven** (`docs/phase1-guardrail-templates.prd`) —
+`agents/guardrails.py` is now a thin ADK-callback-wiring layer (same public
+functions/signatures as before) delegating to a standalone rule engine in
+`guardrails/` (`guardrails/engine.py`, `guardrails/schemas.py`), loaded from
+`guardrails/templates/default.yaml`. The 4 checks above (budget cap,
+supplier availability, quantity range, prompt-injection patterns) are each
+one `GuardrailRule` entry in that file; adding or tuning a rule (e.g. a new
+injection phrase, or a tighter quantity range) is a YAML edit, not a code
+change — see `tests/test_guardrails_engine.py` for a live example.
 
 Every **accepted** plan, plus any guardrail trips, is persisted to
 `data/supply_agents.db` (git-ignored — it's a run artifact, not source) —

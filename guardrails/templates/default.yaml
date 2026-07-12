@@ -1,0 +1,21 @@
+name: default
+rules:
+  - name: budget_cap
+    type: budget_cap
+    params: {}
+  - name: supplier_availability
+    type: supplier_availability
+    params: {}
+  - name: quantity_range
+    type: quantity_range
+    params: {min: 1, max: 100000}
+  - name: prompt_injection
+    type: injection_pattern
+    params:
+      patterns:
+        - 'ignore (all |any )?(previous|prior|above) instructions'
+        - 'disregard (all |any )?(previous|prior|above) (instructions|rules)'
+        - 'you are now\b'
+        - 'system prompt'
+        - 'new instructions?:'
+        - 'override (the )?budget (cap|limit)'
