@@ -50,6 +50,15 @@ See `docs/feature.prd` §13. In short:
   `AgentTool` sub-runs; this uses a plugin instead, see
   `agents/observability.py::TraceCollectorPlugin`) plus the final plan and
   run history.
+- `guardrails/` — the YAML-driven guardrail rule engine (budget cap,
+  supplier availability, quantity range, prompt-injection patterns), loaded
+  from `guardrails/templates/default.yaml`. `agents/guardrails.py` is a thin
+  wrapper over it for the ADK callback wiring. See
+  `docs/phase1-guardrail-templates.prd`.
+- `a2a_demo/` — a standalone Agent2Agent (A2A) protocol demo: a peer agent
+  served over HTTP (`serve_peer.py`) and a caller that reaches it as a
+  remote agent (`call_peer.py`). Decoupled from the main pipeline — see
+  `docs/phase1-a2a-demo.prd`.
 
 ## Run it
 
@@ -145,7 +154,33 @@ In normal use, the procurement agent launches `market_data` and the
 supervisor launches `log_store`, each as its own subprocess via `McpToolset`
 (docs/phase1-db-mcp.prd).
 
-### 5. Unit tests (deterministic tools + guardrail validator + webapp routes)
+### 5. A2A protocol demo (standalone)
+
+```bash
+uv run uvicorn a2a_demo.serve_peer:app --port 8001   # terminal 1 — the remote peer
+uv run python -m a2a_demo.call_peer                  # terminal 2 — the caller
+```
+
+Demonstrates the Agent2Agent (A2A) protocol as two independent local
+processes (docs/phase1-a2a-demo.prd): `a2a_demo/serve_peer.py` exposes a
+minimal ADK agent playing "partner-logistics-org's agent" (one synthetic
+tool, `get_partner_lead_time_estimate`) as a Starlette app via
+`google.adk.a2a.utils.agent_to_a2a.to_a2a`, serving its agent card at
+`http://localhost:8001/.well-known/agent-card.json`. `a2a_demo/call_peer.py`
+resolves that card, wraps it as a `RemoteA2aAgent` tool on a small local
+caller agent, and sends one demo message — printing the round-trip response
+from the remote peer.
+
+Deliberately **decoupled from the main supervisor pipeline** — a generic
+simulated peer, proving the protocol mechanics (agent card resolution, HTTP
+transport, message conversion) work end-to-end, not wired into
+`ActionPlan`/guardrails/evals. Requires `GOOGLE_API_KEY` (both sides make
+real Gemini calls) and the peer already running before you start the
+caller. Uses the experimental `google-adk[a2a]` extra — expect
+`[EXPERIMENTAL]` warnings in the output, that's the installed SDK, not a
+bug here.
+
+### 6. Unit tests (deterministic tools + guardrail validator + webapp routes)
 
 ```bash
 uv run pytest
@@ -156,7 +191,7 @@ routes only. `POST /scenarios/{id}/run` (which triggers a real, multi-minute,
 multi-dollar agent run) is deliberately not covered by the automated suite —
 verify that one manually.
 
-### 6. Evals
+### 7. Evals
 
 ```bash
 uv run python -m evals.run_evals            # all 12 cases
