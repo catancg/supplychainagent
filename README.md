@@ -59,6 +59,13 @@ See `docs/feature.prd` §13. In short:
   served over HTTP (`serve_peer.py`) and a caller that reaches it as a
   remote agent (`call_peer.py`). Decoupled from the main pipeline — see
   `docs/phase1-a2a-demo.prd`.
+- `ml/` — the trained demand-forecast regression model that backs
+  `tools/demand_tools.py::forecast_demand`/`forecast_demand_for_all_skus`,
+  replacing the original fixed weighted-average formula. `ml/features.py`
+  is the single source of truth for the feature vector (shared by training
+  and inference); `ml/models/demand_forecast.joblib` is committed so the
+  tool works out of the box after a clean checkout. See
+  `docs/phase1-ml-demand-model.prd`.
 
 ## Run it
 
@@ -180,7 +187,32 @@ caller. Uses the experimental `google-adk[a2a]` extra — expect
 `[EXPERIMENTAL]` warnings in the output, that's the installed SDK, not a
 bug here.
 
-### 6. Unit tests (deterministic tools + guardrail validator + webapp routes)
+### 6. Demand forecast model (training, optional)
+
+```bash
+uv run python -m ml.generate_training_data   # writes ml/data/synthetic_demand.csv (git-ignored)
+uv run python -m ml.train_demand_model       # trains + prints MAE/RMSE, saves ml/models/demand_forecast.joblib
+```
+
+`ml/models/demand_forecast.joblib` is committed to the repo, so this step
+is **not required** to run the system — `forecast_demand` loads it directly.
+Retrain only if you want to regenerate it (e.g. after changing
+`ml/features.py` or `ml/generate_training_data.py`'s synthetic-data
+parameters). No API key needed — this is local scikit-learn training on a
+synthetic dataset, no Gemini calls.
+
+`tools/demand_tools.py::forecast_demand`/`forecast_demand_for_all_skus`
+predict `forecast_daily_demand` from this model instead of the original
+`0.4 * historical_avg + 0.6 * recent_avg` formula (docs/phase1-ml-demand-model.prd).
+`is_spike`/`spike_ratio` deliberately keep the original trailing-average
+heuristic, independent of the model — this was an explicit design decision
+to guarantee spike classification can't drift on the existing 12 scenarios
+regardless of what the model predicts; verified with zero mismatches
+against the original formula across every SKU in every scenario. Falls back
+to the original formula automatically if the model file is missing or
+fails to load (see `ml/predictor.py`).
+
+### 7. Unit tests (deterministic tools + guardrail validator + webapp routes)
 
 ```bash
 uv run pytest
@@ -191,7 +223,7 @@ routes only. `POST /scenarios/{id}/run` (which triggers a real, multi-minute,
 multi-dollar agent run) is deliberately not covered by the automated suite —
 verify that one manually.
 
-### 7. Evals
+### 8. Evals
 
 ```bash
 uv run python -m evals.run_evals            # all 12 cases

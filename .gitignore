@@ -7,6 +7,10 @@ chroma_data/
 data/
 .ruff_cache/
 
+# Regenerable synthetic training data (docs/phase1-ml-demand-model.prd) —
+# ml/models/*.joblib IS committed (the trained model itself), this is not.
+ml/data/
+
 # Claude Code local tooling artifacts — not part of the project
 .claude/settings.local.json
 .agents/
