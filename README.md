@@ -5,6 +5,10 @@ specialists — **demand, inventory, procurement** — to produce a supply-chain
 action plan for a static scenario fixture. See [docs/feature.prd](docs/feature.prd)
 for the full spec; this README covers setup and how to run things.
 
+**New to this repo and just want to verify it works?** See
+[TESTING.md](TESTING.md) — a self-contained, step-by-step QA checklist for
+every piece described below, with expected output for each step.
+
 ## Setup
 
 ```bash
