@@ -151,6 +151,73 @@ def test_insert_action_plan_computes_total_cost(tmp_path: Path):
     assert total_cost == 1500.0
 
 
+def test_insert_and_list_run_costs_roundtrip(tmp_path: Path):
+    db_path = tmp_path / "test.db"
+    db.init_db(db_path)
+
+    row_id = db.insert_run_cost(
+        timestamp="2026-07-21T00:00:00+00:00",
+        source="webapp",
+        scenario="demand_spike",
+        case_name=None,
+        total_tokens=12345,
+        cost_usd=0.01234,
+        cost_by_agent={"supervisor_agent": 0.006, "demand_agent": 0.004, "inventory_agent": 0.00234},
+        db_path=db_path,
+    )
+    assert row_id == 1
+
+    entries = db.list_run_costs(db_path=db_path)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["source"] == "webapp"
+    assert entry["scenario"] == "demand_spike"
+    assert entry["case"] is None
+    assert entry["total_tokens"] == 12345
+    assert entry["cost_usd"] == 0.01234
+    assert entry["cost_by_agent"]["supervisor_agent"] == 0.006
+
+
+def test_insert_run_cost_for_eval_case(tmp_path: Path):
+    db_path = tmp_path / "test.db"
+    db.init_db(db_path)
+
+    db.insert_run_cost(
+        timestamp="2026-07-21T00:00:00+00:00",
+        source="eval",
+        scenario="normal",
+        case_name="normal",
+        total_tokens=500,
+        cost_usd=0.0001,
+        cost_by_agent={},
+        db_path=db_path,
+    )
+
+    entry = db.list_run_costs(db_path=db_path)[0]
+    assert entry["source"] == "eval"
+    assert entry["case"] == "normal"
+
+
+def test_list_run_costs_newest_first(tmp_path: Path):
+    db_path = tmp_path / "test.db"
+    db.init_db(db_path)
+
+    for scenario in ["first", "second", "third"]:
+        db.insert_run_cost(
+            timestamp="2026-07-21T00:00:00+00:00",
+            source="webapp",
+            scenario=scenario,
+            case_name=None,
+            total_tokens=0,
+            cost_usd=0.0,
+            cost_by_agent={},
+            db_path=db_path,
+        )
+
+    entries = db.list_run_costs(db_path=db_path)
+    assert [e["scenario"] for e in entries] == ["third", "second", "first"]
+
+
 def test_write_action_plan_mcp_tool_persists_a_row(tmp_path: Path, monkeypatch):
     # write_action_plan uses db.DB_PATH internally (no override param — it's
     # the MCP tool surface, called by the LLM, not a test-facing API), so

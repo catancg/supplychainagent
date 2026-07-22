@@ -2,6 +2,13 @@
 
 Scenarios are static JSON files under scenarios/ — see docs/feature.prd §3.
 No database, no simulator: this is the entire "world" substrate.
+
+Scenario content is sanitized for injection-pattern text at load time (not
+per tool call) — the same YAML-templated rules that scrub RAG/MCP output
+(see docs/phase1-guardrail-templates.prd), applied once at the point
+scenario data enters the system, since a "situation" string or SKU name is,
+in principle, just as capable of carrying an injected instruction as
+retrieved/external content is.
 """
 
 from __future__ import annotations
@@ -10,7 +17,10 @@ import json
 from pathlib import Path
 from typing import Any, MutableMapping
 
+from guardrails.engine import TEMPLATES_DIR, load_template, sanitize_strings
+
 SCENARIOS_DIR = Path(__file__).resolve().parent / "scenarios"
+_DEFAULT_TEMPLATE = load_template(TEMPLATES_DIR / "default.yaml")
 
 
 def resolve_scenario_path(scenario: str | Path) -> Path:
@@ -29,8 +39,11 @@ def resolve_scenario_path(scenario: str | Path) -> Path:
 
 
 def load_scenario(scenario: str | Path) -> dict[str, Any]:
-    """Load and parse a scenario fixture JSON file into a plain dict."""
-    return json.loads(resolve_scenario_path(scenario).read_text(encoding="utf-8"))
+    """Load and parse a scenario fixture JSON file into a plain dict, with
+    every string value scrubbed for injection-pattern text.
+    """
+    raw = json.loads(resolve_scenario_path(scenario).read_text(encoding="utf-8"))
+    return sanitize_strings(raw, _DEFAULT_TEMPLATE.rules)
 
 
 def load_scenario_into_state(

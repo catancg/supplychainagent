@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import yaml
 
@@ -136,3 +136,19 @@ def neutralize_text(rules: list[GuardrailRule], text: str) -> str:
         for pattern_str in rule.params.get("patterns", []):
             cleaned = re.sub(pattern_str, _REDACTION, cleaned, flags=re.IGNORECASE)
     return cleaned
+
+
+def sanitize_strings(value: Any, rules: list[GuardrailRule]) -> Any:
+    """Recursively applies neutralize_text to every string in value (walking
+    dicts/lists), leaving other types untouched and the overall shape
+    unchanged. Used to sanitize data at the point it enters the system
+    (e.g. a loaded scenario) rather than wrapping every tool response that
+    reads it.
+    """
+    if isinstance(value, str):
+        return neutralize_text(rules, value)
+    if isinstance(value, list):
+        return [sanitize_strings(v, rules) for v in value]
+    if isinstance(value, dict):
+        return {k: sanitize_strings(v, rules) for k, v in value.items()}
+    return value

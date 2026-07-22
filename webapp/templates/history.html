@@ -21,6 +21,28 @@
   <p class="muted">No action log entries yet. Run a scenario from the home page.</p>
   {% endif %}
 
+  <h2>Run costs ({{ run_costs | length }})</h2>
+  <p class="muted">Estimated USD cost per pipeline run (agents/pricing.py) — not your actual bill, see README.</p>
+  {% if run_costs %}
+  <table>
+    <thead><tr><th>Timestamp</th><th>Source</th><th>Scenario</th><th>Case</th><th>Tokens</th><th>Est. cost</th></tr></thead>
+    <tbody>
+      {% for entry in run_costs %}
+      <tr>
+        <td>{{ entry.timestamp }}</td>
+        <td>{{ entry.source }}</td>
+        <td>{{ entry.scenario }}</td>
+        <td>{{ entry.case or "—" }}</td>
+        <td>{{ entry.total_tokens }}</td>
+        <td>${{ "%.5f"|format(entry.cost_usd) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No run costs recorded yet.</p>
+  {% endif %}
+
   <h2>Eval log ({{ eval_log | length }})</h2>
   {% if eval_log %}
   {% for entry in eval_log %}

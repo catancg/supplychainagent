@@ -4,8 +4,9 @@ A multi-agent system in **Google ADK**: a supervisor coordinates three
 specialists — **demand, inventory, procurement** — to produce a supply-chain
 action plan for a static scenario fixture. Full spec: [docs/feature.prd](docs/feature.prd).
 
-**To run and verify everything, see [TESTING.md](TESTING.md).** This README
-is architecture reference.
+**To run and verify everything, see [TESTING.md](TESTING.md).** For
+architecture, design trade-offs, limitations, and future work, see
+[REPORT.md](REPORT.md). This README is a quick architecture reference.
 
 ## Setup
 
@@ -42,6 +43,10 @@ cp .env.example .env   # then fill in GOOGLE_API_KEY (https://aistudio.google.co
 - `ml/` — trained regression model backing `forecast_demand`, replacing the
   old fixed-weight formula. `ml/models/demand_forecast.joblib` is committed.
   See `docs/phase1-ml-demand-model.prd`.
+- `agents/trigger_guard.py` — the worker-trigger security gate (see
+  "Trigger security" below).
+- `agents/pricing.py` — estimated USD cost per model call (see "Cost
+  tracking" below).
 
 ## Eval scenarios
 
@@ -71,3 +76,37 @@ Rules are YAML config (`guardrails/templates/default.yaml`), not hardcoded —
 see `docs/phase1-guardrail-templates.prd`. Every **accepted** plan is
 persisted to `data/supply_agents.db` via the `write_action_plan` MCP tool;
 rejected (over-budget) plans are not.
+
+## Trigger security
+
+The webapp and `evals.run_evals` are "worker"-style entry points — the
+message that starts a run is a fixed, code-constructed string
+(`agents/trigger_guard.py::EXPECTED_TRIGGER_MESSAGE`), never user-typed
+free text. `create_app(strict_trigger=True)` (used by both) wires a
+`before_agent_callback` that **rejects anything that isn't an exact match
+before any model call happens** — a prompt-injection attempt sent this way
+never reaches Gemini at all (verified: 0 model calls, rejected in ~1ms).
+Scenario data itself is also sanitized for injection-pattern text at load
+time (`loader.py`), reusing the same rule engine that scrubs RAG/MCP output.
+
+**`adk web`/`adk run`** (`agents/__init__.py`, `strict_trigger=False`,
+the default) are **intentionally exempt** — that's Google's own open,
+interactive dev/debugging tool, not a hardened production entry point.
+Anything typed there reaches the supervisor unfiltered by the trigger gate
+(though the sanitized-scenario-data and instruction-level defenses still
+apply). Don't treat `adk web` as a security boundary.
+
+## Cost tracking
+
+`TokenUsagePlugin` (`agents/observability.py`) estimates a **USD cost per
+run** from token usage, using a hardcoded per-model rate table
+(`agents/pricing.py`) — this is an estimate for cost-awareness, **not your
+actual bill** (free-tier allowances, batch discounts, and pricing changes
+aren't reflected). Printed per model call (`[cost] <agent>: $...`) and as a
+per-run total, tracked both overall and per agent. Persisted to
+`data/supply_agents.db`'s `run_costs` table by the webapp and
+`evals.run_evals` (each pipeline invocation is one row); shown in the
+webapp's Result page (per-run) and History page (`run_costs` table, across
+all runs). `adk web` still prints the per-call console lines but nothing
+persists or reads back its totals — it's driven by the ADK CLI, not this
+project's runner code.

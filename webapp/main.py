@@ -77,5 +77,6 @@ async def history(request: Request):
         {
             "action_log": runner_service.load_action_log(),
             "eval_log": runner_service.load_eval_log(),
+            "run_costs": runner_service.load_run_costs(),
         },
     )

@@ -26,7 +26,9 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 import db
+from agents.observability import TokenUsagePlugin
 from agents.supervisor_agent import create_app
+from agents.trigger_guard import EXPECTED_TRIGGER_MESSAGE
 from evals.cases import CASES, EvalCase
 from evals.judge import judge_rationale
 from loader import load_scenario
@@ -49,8 +51,9 @@ async def _run_case(case: EvalCase) -> dict:
         state={"world": world, "situation": world.get("situation")},
     )
 
+    token_usage_plugin = TokenUsagePlugin()
     runner = Runner(
-        app=create_app(name=APP_NAME),
+        app=create_app(name=APP_NAME, strict_trigger=True, token_usage_plugin=token_usage_plugin),
         session_service=session_service,
     )
 
@@ -59,7 +62,7 @@ async def _run_case(case: EvalCase) -> dict:
         session_id=session.id,
         new_message=types.Content(
             role="user",
-            parts=[types.Part(text="Produce an action plan for the current situation.")],
+            parts=[types.Part(text=EXPECTED_TRIGGER_MESSAGE)],
         ),
     ):
         pass
@@ -96,6 +99,9 @@ async def _run_case(case: EvalCase) -> dict:
         "action_plan": action_plan,
         "guardrail_trips": state.get("guardrail_trips", []),
         "error": None,
+        "total_tokens": token_usage_plugin.total_tokens,
+        "cost_usd": token_usage_plugin.total_cost_usd,
+        "cost_by_agent": token_usage_plugin.cost_by_agent,
     }
 
 
@@ -122,6 +128,9 @@ async def _run_case_resilient(case: EvalCase) -> dict:
         "action_plan": None,
         "guardrail_trips": [],
         "error": f"{type(last_exc).__name__}: {last_exc}",
+        "total_tokens": 0,
+        "cost_usd": 0.0,
+        "cost_by_agent": {},
     }
 
 
@@ -139,6 +148,9 @@ def _serialize_result(result: dict) -> dict:
         "action_plan": result["action_plan"],
         "guardrail_trips": result["guardrail_trips"],
         "error": result["error"],
+        "total_tokens": result["total_tokens"],
+        "cost_usd": result["cost_usd"],
+        "cost_by_agent": result["cost_by_agent"],
     }
 
 
@@ -155,6 +167,15 @@ def _write_to_db(entry: dict) -> None:
         guardrail_trips=entry["guardrail_trips"],
         error=entry["error"],
     )
+    db.insert_run_cost(
+        timestamp=entry["timestamp"],
+        source="eval",
+        scenario=entry["scenario"],
+        case_name=entry["case"],
+        total_tokens=entry["total_tokens"],
+        cost_usd=entry["cost_usd"],
+        cost_by_agent=entry["cost_by_agent"],
+    )
 
 
 def _print_case_report(serialized: dict) -> None:
@@ -167,6 +188,10 @@ def _print_case_report(serialized: dict) -> None:
         status = "PASS" if a["passed"] else "FAIL"
         print(f"  [Layer A] {status} — {a['name']}: {a['detail']}")
     print(f"  [Layer B] {serialized['layer_b']}")
+    print(
+        f"  [Cost] {serialized['total_tokens']} tokens, "
+        f"est. ${serialized['cost_usd']:.5f}"
+    )
     if serialized["guardrail_trips"]:
         print(f"  [Guardrails] trips: {serialized['guardrail_trips']}")
 

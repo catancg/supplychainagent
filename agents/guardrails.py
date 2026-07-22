@@ -25,7 +25,13 @@ from typing import Any
 
 from google.adk.tools import BaseTool, ToolContext
 
-from guardrails.engine import TEMPLATES_DIR, evaluate_plan_rules, load_template, neutralize_text
+from guardrails.engine import (
+    TEMPLATES_DIR,
+    evaluate_plan_rules,
+    load_template,
+    neutralize_text,
+    sanitize_strings,
+)
 
 # Tool names whose output is external/retrieved and must be treated as
 # untrusted. Not templated — which tools count as "untrusted" is a wiring
@@ -41,13 +47,7 @@ def neutralize_injection(text: str) -> str:
 
 
 def _sanitize_value(value: Any) -> Any:
-    if isinstance(value, str):
-        return neutralize_injection(value)
-    if isinstance(value, list):
-        return [_sanitize_value(v) for v in value]
-    if isinstance(value, dict):
-        return {k: _sanitize_value(v) for k, v in value.items()}
-    return value
+    return sanitize_strings(value, _DEFAULT_TEMPLATE.rules)
 
 
 async def sanitize_untrusted_tool_output(

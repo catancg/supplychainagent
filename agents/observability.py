@@ -16,6 +16,8 @@ from google.adk.sessions.state import State
 from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
+from agents.pricing import estimate_cost_usd
+
 # The one tool that grounds reasoning in the RAG policy corpus (docs/feature.prd
 # §7) — flagged in the trace so RAG usage is visually distinguishable from
 # plain deterministic tool calls.
@@ -117,9 +119,19 @@ class TraceCollectorPlugin(BasePlugin):
 
 
 class TokenUsagePlugin(BasePlugin):
+    """Tracks token usage and an estimated USD cost (agents/pricing.py) per
+    model call, printed immediately and kept as running totals — overall and
+    per agent — for the whole run this plugin instance is attached to. A
+    fresh instance per run (see create_app's token_usage_plugin param) is
+    what makes "per run" the natural unit: totals start at zero and
+    accumulate for exactly one pipeline invocation, not across runs.
+    """
+
     def __init__(self):
         super().__init__(name="token_usage")
         self.total_tokens = 0
+        self.total_cost_usd = 0.0
+        self.cost_by_agent: dict[str, float] = {}
 
     async def after_model_callback(
         self, *, callback_context: CallbackContext, llm_response: LlmResponse
@@ -129,12 +141,27 @@ class TokenUsagePlugin(BasePlugin):
             return None
 
         self.total_tokens += usage.total_token_count or 0
+        agent_name = callback_context.agent_name
+
+        cost = estimate_cost_usd(
+            model=llm_response.model_version,
+            prompt_tokens=usage.prompt_token_count or 0,
+            cached_tokens=usage.cached_content_token_count or 0,
+            output_tokens=usage.candidates_token_count or 0,
+            thinking_tokens=usage.thoughts_token_count or 0,
+        )
+        self.total_cost_usd += cost
+        self.cost_by_agent[agent_name] = self.cost_by_agent.get(agent_name, 0.0) + cost
+
         print(
-            f"[tokens] {callback_context.agent_name}: "
+            f"[tokens] {agent_name}: "
             f"prompt={usage.prompt_token_count or 0} "
             f"output={usage.candidates_token_count or 0} "
             f"thinking={usage.thoughts_token_count or 0} "
             f"total={usage.total_token_count or 0} "
             f"(running total={self.total_tokens})"
+        )
+        print(
+            f"[cost] {agent_name}: ${cost:.5f} (estimated, running total=${self.total_cost_usd:.5f})"
         )
         return None

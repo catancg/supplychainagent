@@ -44,6 +44,22 @@ CREATE TABLE IF NOT EXISTS eval_results (
   guardrail_trips_json TEXT NOT NULL,
   error TEXT
 );
+
+-- Estimated USD cost per pipeline run (agents/pricing.py) — a harness-level
+-- observability concern like eval grading, written directly by whichever
+-- deterministic caller ran the pipeline (webapp or evals), not via MCP:
+-- unlike action_plans (an agent-initiated write, mid-run, before total cost
+-- is known), this is written once the run has fully finished.
+CREATE TABLE IF NOT EXISTS run_costs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp TEXT NOT NULL,
+  source TEXT NOT NULL,            -- "webapp" or "eval"
+  scenario TEXT NOT NULL,
+  case_name TEXT,                  -- eval case name; NULL for webapp runs
+  total_tokens INTEGER NOT NULL,
+  cost_usd REAL NOT NULL,
+  cost_by_agent_json TEXT NOT NULL
+);
 """
 
 
@@ -138,6 +154,37 @@ def insert_eval_result(
         return cur.lastrowid
 
 
+def insert_run_cost(
+    timestamp: str,
+    source: str,
+    scenario: str,
+    case_name: str | None,
+    total_tokens: int,
+    cost_usd: float,
+    cost_by_agent: dict[str, float],
+    db_path: Path | None = None,
+) -> int:
+    with _connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO run_costs
+                (timestamp, source, scenario, case_name, total_tokens, cost_usd, cost_by_agent_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                timestamp,
+                source,
+                scenario,
+                case_name,
+                total_tokens,
+                cost_usd,
+                json.dumps(cost_by_agent),
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
 def _row_to_action_plan_entry(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "timestamp": row["timestamp"],
@@ -163,6 +210,28 @@ def _row_to_eval_result_entry(row: sqlite3.Row) -> dict[str, Any]:
         "guardrail_trips": json.loads(row["guardrail_trips_json"]),
         "error": row["error"],
     }
+
+
+def _row_to_run_cost_entry(row: sqlite3.Row) -> dict[str, Any]:
+    return {
+        "timestamp": row["timestamp"],
+        "source": row["source"],
+        "scenario": row["scenario"],
+        "case": row["case_name"],
+        "total_tokens": row["total_tokens"],
+        "cost_usd": row["cost_usd"],
+        "cost_by_agent": json.loads(row["cost_by_agent_json"]),
+    }
+
+
+def list_run_costs(limit: int | None = None, db_path: Path | None = None) -> list[dict]:
+    """Most recent first."""
+    query = "SELECT * FROM run_costs ORDER BY id DESC"
+    if limit is not None:
+        query += f" LIMIT {int(limit)}"
+    with _connect(db_path) as conn:
+        rows = conn.execute(query).fetchall()
+    return [_row_to_run_cost_entry(r) for r in rows]
 
 
 def list_action_plans(limit: int | None = None, db_path: Path | None = None) -> list[dict]:

@@ -3,7 +3,18 @@
 {% block content %}
   <p><a href="/scenarios/{{ scenario }}">← {{ scenario }}</a></p>
   <h1>{{ scenario }} <span class="badge">{{ situation }}</span></h1>
-  <p class="muted">Run completed in {{ duration_seconds }}s · {{ trace | length }} trace entries.</p>
+  <p class="muted">
+    Run completed in {{ duration_seconds }}s · {{ trace | length }} trace entries ·
+    {{ total_tokens }} tokens · est. cost ${{ "%.5f"|format(cost_usd) }}
+  </p>
+  <details>
+    <summary>Cost by agent (estimated)</summary>
+    <ul>
+      {% for agent, cost in cost_by_agent.items() %}
+      <li><code>{{ agent }}</code>: ${{ "%.5f"|format(cost) }}</li>
+      {% endfor %}
+    </ul>
+  </details>
 
   {% if guardrail_trips %}
   <div class="alert">

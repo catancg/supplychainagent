@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from google.adk.runners import Runner
@@ -18,8 +19,9 @@ from google.adk.sessions import DatabaseSessionService
 from google.genai import types
 
 import db
-from agents.observability import TraceCollectorPlugin
+from agents.observability import TokenUsagePlugin, TraceCollectorPlugin
 from agents.supervisor_agent import create_app
+from agents.trigger_guard import EXPECTED_TRIGGER_MESSAGE
 from evals.cases import CASES
 from loader import list_scenarios, load_scenario
 
@@ -114,8 +116,14 @@ async def _run_scenario_once(scenario_id: str) -> dict[str, Any]:
     )
 
     trace_plugin = TraceCollectorPlugin()
+    token_usage_plugin = TokenUsagePlugin()
     runner = Runner(
-        app=create_app(name=APP_NAME, extra_plugins=[trace_plugin]),
+        app=create_app(
+            name=APP_NAME,
+            extra_plugins=[trace_plugin],
+            strict_trigger=True,
+            token_usage_plugin=token_usage_plugin,
+        ),
         session_service=session_service,
     )
 
@@ -125,7 +133,7 @@ async def _run_scenario_once(scenario_id: str) -> dict[str, Any]:
         session_id=session.id,
         new_message=types.Content(
             role="user",
-            parts=[types.Part(text="Produce an action plan for the current situation.")],
+            parts=[types.Part(text=EXPECTED_TRIGGER_MESSAGE)],
         ),
     ):
         pass
@@ -142,6 +150,16 @@ async def _run_scenario_once(scenario_id: str) -> dict[str, Any]:
         entry["elapsed"] = round(entry.pop("timestamp") - started_at, 2)
         trace.append(entry)
 
+    db.insert_run_cost(
+        timestamp=datetime.now(timezone.utc).isoformat(),
+        source="webapp",
+        scenario=scenario_id,
+        case_name=None,
+        total_tokens=token_usage_plugin.total_tokens,
+        cost_usd=token_usage_plugin.total_cost_usd,
+        cost_by_agent=token_usage_plugin.cost_by_agent,
+    )
+
     return {
         "scenario": scenario_id,
         "situation": world.get("situation"),
@@ -155,6 +173,9 @@ async def _run_scenario_once(scenario_id: str) -> dict[str, Any]:
         "action_plan": state.get("action_plan", {"purchase_orders": [], "rationale": ""}),
         "guardrail_trips": state.get("guardrail_trips", []),
         "duration_seconds": round(duration_seconds, 1),
+        "total_tokens": token_usage_plugin.total_tokens,
+        "cost_usd": token_usage_plugin.total_cost_usd,
+        "cost_by_agent": token_usage_plugin.cost_by_agent,
     }
 
 
@@ -164,3 +185,7 @@ def load_action_log() -> list[dict]:
 
 def load_eval_log() -> list[dict]:
     return db.list_eval_results()
+
+
+def load_run_costs() -> list[dict]:
+    return db.list_run_costs()

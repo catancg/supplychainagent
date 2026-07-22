@@ -5,7 +5,7 @@ project, so async plugin hooks are driven directly via asyncio.run().
 
 import asyncio
 
-from agents.observability import RAG_TOOLS, TraceCollectorPlugin
+from agents.observability import RAG_TOOLS, TokenUsagePlugin, TraceCollectorPlugin
 
 
 class FakeTool:
@@ -102,3 +102,80 @@ def test_temp_and_internal_state_keys_ignored_in_diff():
     _run(plugin.after_tool_callback(tool=tool, tool_args={}, tool_context=ctx, result={}))
 
     assert [e for e in plugin.trace if e["type"] == "state_change"] == []
+
+
+class FakeCallbackContext:
+    def __init__(self, agent_name: str):
+        self.agent_name = agent_name
+
+
+class FakeUsageMetadata:
+    def __init__(
+        self,
+        prompt_token_count=0,
+        candidates_token_count=0,
+        thoughts_token_count=0,
+        cached_content_token_count=0,
+        total_token_count=0,
+    ):
+        self.prompt_token_count = prompt_token_count
+        self.candidates_token_count = candidates_token_count
+        self.thoughts_token_count = thoughts_token_count
+        self.cached_content_token_count = cached_content_token_count
+        self.total_token_count = total_token_count
+
+
+class FakeLlmResponse:
+    def __init__(self, model_version: str, usage_metadata):
+        self.model_version = model_version
+        self.usage_metadata = usage_metadata
+
+
+def test_token_usage_plugin_accumulates_tokens_and_cost():
+    plugin = TokenUsagePlugin()
+    ctx = FakeCallbackContext("demand_agent")
+    usage = FakeUsageMetadata(
+        prompt_token_count=1000, candidates_token_count=100, thoughts_token_count=50, total_token_count=1150
+    )
+    response = FakeLlmResponse("gemini-2.5-flash", usage)
+
+    _run(plugin.after_model_callback(callback_context=ctx, llm_response=response))
+
+    assert plugin.total_tokens == 1150
+    assert plugin.total_cost_usd > 0
+    assert plugin.cost_by_agent["demand_agent"] == plugin.total_cost_usd
+
+
+def test_token_usage_plugin_tracks_per_agent_breakdown_across_multiple_calls():
+    plugin = TokenUsagePlugin()
+    usage = FakeUsageMetadata(prompt_token_count=1000, candidates_token_count=100, total_token_count=1100)
+
+    _run(
+        plugin.after_model_callback(
+            callback_context=FakeCallbackContext("demand_agent"),
+            llm_response=FakeLlmResponse("gemini-2.5-flash", usage),
+        )
+    )
+    _run(
+        plugin.after_model_callback(
+            callback_context=FakeCallbackContext("supervisor_agent"),
+            llm_response=FakeLlmResponse("gemini-2.5-flash", usage),
+        )
+    )
+
+    assert set(plugin.cost_by_agent.keys()) == {"demand_agent", "supervisor_agent"}
+    assert plugin.cost_by_agent["demand_agent"] == plugin.cost_by_agent["supervisor_agent"]
+    assert plugin.total_cost_usd == plugin.cost_by_agent["demand_agent"] + plugin.cost_by_agent["supervisor_agent"]
+    assert plugin.total_tokens == 2200
+
+
+def test_token_usage_plugin_skips_when_usage_metadata_missing():
+    plugin = TokenUsagePlugin()
+    ctx = FakeCallbackContext("demand_agent")
+    response = FakeLlmResponse("gemini-2.5-flash", None)
+
+    _run(plugin.after_model_callback(callback_context=ctx, llm_response=response))
+
+    assert plugin.total_tokens == 0
+    assert plugin.total_cost_usd == 0.0
+    assert plugin.cost_by_agent == {}
