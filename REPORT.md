@@ -60,7 +60,65 @@ Key properties:
   `loader.py` — the entire "world" (SKUs, warehouses, suppliers, budget) is
   read fresh from disk, not from a database.
 
-### 1.2 Supporting subsystems
+### 1.2 How it works, in plain terms
+
+**The four agents:**
+
+- **Demand agent** — forecasts how much of each SKU will sell soon, and
+  flags any that look like a spike. Tools: reads the world snapshot, runs a
+  batch demand forecast (backed by the trained ML model, see below), and
+  writes its findings to shared state.
+- **Inventory agent** — decides which SKU/warehouse combinations are
+  running low and need restocking, and by how much. Tools: computes reorder
+  points, checks current stock levels, and looks up the stocking policy via
+  RAG (see below) to size safety buffers correctly.
+- **Procurement agent** — for anything that needs restocking, picks a
+  supplier, quantity, and cost. Tools: ranks suppliers by cost/lead-time/
+  reliability, looks up policy via RAG, and calls an MCP tool for a live
+  exchange rate (see below).
+- **Supervisor** — runs the other three in order, reads back everything
+  they found, reconciles it into one purchase-order plan (cover the
+  shortfall, minimize cost, respect budget), and — once the guardrails
+  approve it — logs the plan via another MCP tool.
+
+**RAG** (`kb/`, `rag/`) exists so inventory/procurement ground their
+reasoning in *written* company policy (stocking rules, budget discipline,
+supplier preference) instead of just guessing plausible-sounding numbers.
+
+**MCP** (`mcp_server/`) exists to demonstrate the agent actually reaching
+outside its own process for two things: a live-ish exchange rate
+(read-only) and persisting an approved plan to the database (write) — both
+go through the Model Context Protocol rather than being plain in-process
+function calls, so they behave like calls to a genuinely external system.
+
+**The LLM judge** is a second opinion, not a gate: after a plan is
+produced, a separate model call reads the rationale and scores whether it
+actually matches what the specialists found and respects the budget. It's
+recorded for every run but never blocks anything — it's there to catch
+"the reasoning quietly got worse" over time, which the strict pass/fail
+checks can't see.
+
+**Session state** is the shared scratchpad the four agents write to and
+read from — each specialist's findings land in state under its own key, so
+the next agent (and the supervisor) can see them without anyone re-stating
+results in a prompt.
+
+**Scenarios** (`scenarios/*.json`) are fixed, fully-known test worlds — not
+meant to cover everything, just enough distinct situations (a demand
+spike, a supplier outage, a tight budget, a healthy baseline, ...) to prove
+the agents make the right call in each recognizably different case.
+
+**Briefly, the other three pieces:**
+- **A2A demo** (`a2a_demo/`) — a small, separate demo proving two agents
+  can talk to each other over the Agent2Agent protocol. Not connected to
+  the main pipeline above.
+- **ML forecast model** (`ml/`) — a small trained regression model that
+  replaced the demand agent's original hand-written forecasting formula.
+- **Observability** (`agents/observability.py`) — tracks token usage and
+  estimated cost per model call, and records a full trace of every tool
+  call across all four agents for the webapp's UI.
+
+### 1.3 Supporting subsystems
 
 | Subsystem | Role |
 |---|---|
@@ -71,11 +129,11 @@ Key properties:
 | **A2A demo** (`a2a_demo/`) | A standalone, decoupled demonstration of the Agent2Agent protocol — a peer agent served over HTTP, a caller that reaches it as a remote agent. Not wired into the pipeline above. |
 | **Persistence** (`db.py`) | One SQLite file, three tables (`action_plans`, `eval_results`, `run_costs`), plus ADK's own session tables (webapp only, via `DatabaseSessionService`) for conversation persistence across restarts. |
 | **Observability** (`agents/observability.py`) | A `TraceCollectorPlugin` capturing the full nested tool-call tree across the supervisor *and* all three specialists (needed because `adk web`'s own event view can't show nested `AgentTool` sub-runs), plus a `TokenUsagePlugin` for per-call token and estimated-cost accounting (see "Cost tracking" below). |
-| **Trigger security** (`agents/trigger_guard.py`) | A `before_agent_callback` gate applied by default to every entry point: rejects any invocation whose triggering message isn't an exact match on a fixed, code-constructed instruction, before any model call happens. `strict_trigger=True` is the default on `create_app()` — see §1.3. |
+| **Trigger security** (`agents/trigger_guard.py`) | A `before_agent_callback` gate applied by default to every entry point: rejects any invocation whose triggering message isn't an exact match on a fixed, code-constructed instruction, before any model call happens. `strict_trigger=True` is the default on `create_app()` — see §1.4. |
 | **Cost tracking** (`agents/pricing.py`) | A hardcoded $/1M-token rate table converts each model call's token usage into an estimated USD cost, aggregated per run (overall and per agent) by `TokenUsagePlugin` and persisted to `run_costs` by the webapp/evals (same opt-in pattern as the trigger gate — see §2). |
 | **Transient-error retries** (`agents/model_config.py`) | Every agent's model (and the eval judge's client) carries `google.genai.types.HttpRetryOptions`, the SDK's own HTTP-level retry — applies uniformly to every entry point, including `adk web`, which previously had no retry logic at all. See §2. |
 
-### 1.3 Entry points
+### 1.4 Entry points
 
 - **`adk web .`** — Google's own interactive UI; auto-loads a default
   scenario on first turn. Executes only on an exact match of
@@ -87,7 +145,7 @@ Key properties:
   RAG-usage highlighting, browse run history. The message that starts a run
   is always the same fixed string, never user-typed text.
 - **`evals.run_evals`** — CLI eval harness; runs the same pipeline against
-  12 curated scenarios and grades the result (see §1.4).
+  12 curated scenarios and grades the result (see §1.5).
 - All three ultimately construct the same `App`
   (`agents/supervisor_agent.py::create_app`), so behavior is fully
   consistent across entry points — `strict_trigger` used to default to
@@ -96,7 +154,7 @@ Key properties:
   testing showed `adk web`'s open chat was itself the injection surface
   worth closing.
 
-### 1.4 Evaluation model
+### 1.5 Evaluation model
 
 Two independent grading layers, deliberately asymmetric in authority:
 
@@ -119,7 +177,7 @@ Two independent grading layers, deliberately asymmetric in authority:
 | Local SQLite file | External hosted DB (e.g. Supabase) | Single-operator dev/demo tool, no concurrent-writer or remote-access need. An external service adds a secret, a network dependency, and a new failure mode for no offsetting benefit. Not a one-way door — both `db.py` and `DatabaseSessionService` take an arbitrary connection string, so this is a config change later, not a rewrite. |
 | MCP only for *agent-initiated* writes | MCP for all DB access, including our own harness/webapp code | MCP overhead is only justified where an LLM is actually making the call/no-call decision. Eval and webapp history reads/writes go straight to `db.py` — no protocol overhead for deterministic code. |
 | Guardrail rules as YAML config | Keep rules hardcoded in Python | Config-driven rules let a new check (or a tuned threshold) ship as a one-line YAML edit instead of a code change/redeploy — proved this by adding a new prompt-injection pattern purely via YAML, with a passing test. |
-| `is_spike` kept on the original heuristic, decoupled from the ML forecast | Derive spike classification from the model's own prediction | The trained model can predict *lower* than the old formula after a spike (it learned demand reverts, doesn't stay elevated) — coupling spike classification to that value risked silently flipping behavior on existing eval cases. Decoupling was the cheaper, lower-risk option; verified zero regressions across all 12 scenarios × every SKU. |
+| Derive spike classification from the model's own prediction | The trained model can predict *lower* than the old formula after a spike (it learned demand reverts, doesn't stay elevated) — coupling spike classification to that value risked silently flipping behavior on existing eval cases. Decoupling was the cheaper, lower-risk option; verified zero regressions across all 12 scenarios × every SKU. |
 | A2A demo fully decoupled from the supervisor pipeline | Wire a real cross-org lead-time lookup into procurement's flow | The production pipeline already had 12 passing eval cases and a guardrail-gated commit path; a live network call to a second process adds a new failure mode (timeout, malformed response, process not running) for a piece explicitly scoped as "prove the protocol, no domain role." A decoupled demo proves the same mechanics with zero blast radius. |
 | Fail-soft tool design | Let validation errors propagate/crash the run | An uncaught `pydantic.ValidationError` once crashed the entire `adk run` process. All `emit_*` tools now catch and return `{"status": "error", ...}`; the ML predictor falls back to the original formula rather than raising if the model file is missing/corrupt. |
 | Two-layer, asymmetric eval grading | Single grading mechanism (e.g. LLM-judge only) | Deterministic assertions are reliable enough to gate CI-style pass/fail; LLM judging is valuable as a *quality* signal (rationale clarity, citation of policy) but not reliable enough to gate on without producing flaky failures unrelated to real correctness. |
@@ -167,10 +225,6 @@ Two independent grading layers, deliberately asymmetric in authority:
 - **`google-adk[a2a]` and related ML/DB extras are explicitly experimental**
   — `to_a2a`/`RemoteA2aAgent` emit `[EXPERIMENTAL]` warnings; the API
   surface could change in a future ADK release without notice.
-- **Platform-specific friction (Windows)** — phantom TCP listeners after
-  killing a process, and (surfaced directly during handoff testing) two
-  separate `adk` executables resolving on `PATH`, producing a confusing
-  `ImportError` unrelated to the actual code.
 - **No production-readiness work was in scope** — no authentication on the
   webapp or MCP servers, no deployment/scaling story, everything assumes a
   single local operator on `localhost`. Deliberate scope boundary for a
@@ -181,7 +235,7 @@ Two independent grading layers, deliberately asymmetric in authority:
   output and scenario content are separately sanitized, but a genuinely
   new untrusted data source added later would need to be wired into the
   same sanitization pass explicitly, it isn't automatic. It's now applied
-  by default everywhere, including `adk web` (see §1.3) — but this also
+  by default everywhere, including `adk web` (see §1.4) — but this also
   means `adk web`'s original role as an unrestricted interactive chat is
   gone by default; anyone who wants that back needs `strict_trigger=False`
   explicitly.
@@ -201,7 +255,7 @@ Two independent grading layers, deliberately asymmetric in authority:
   usage metadata doesn't expose how long content stayed cached, so that
   cost dimension isn't tracked at all. Useful for relative comparison
   (which agent/scenario costs more) but not for exact budgeting. `adk web`
-  runs aren't tracked in `run_costs` at all (see §1.3) — only webapp/eval
+  runs aren't tracked in `run_costs` at all (see §1.4) — only webapp/eval
   runs are.
 - **Scenario switching mid-session isn't supported** — a session loads one
   scenario on its first turn and that's fixed for the session's lifetime;

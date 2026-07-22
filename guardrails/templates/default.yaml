@@ -1,14 +1,27 @@
 name: default
 rules:
+  # Rejects the whole plan if total cost > budget.
+  # Test: uv run pytest tests/test_guardrails.py::test_validate_action_plan_rejects_over_budget -v
+  # No params — always uses world.budget_per_cycle.
   - name: budget_cap
     type: budget_cap
-    params: {}
+
+  # Drops any order from a supplier that's unavailable or doesn't exist.
+  # Test: uv run pytest tests/test_guardrails.py::test_validate_action_plan_drops_unavailable_supplier -v
+  # No params — always checks world.suppliers.
   - name: supplier_availability
     type: supplier_availability
-    params: {}
+
+  # Drops any order with qty <= 0 or qty > 100000.
+  # Test: uv run pytest tests/test_guardrails.py::test_validate_action_plan_drops_bad_quantity -v
+  # params example: {min: 1, max: 500} would make this stricter (max 500 units/order).
   - name: quantity_range
     type: quantity_range
     params: {min: 1, max: 100000}
+
+  # Redacts these phrases wherever they appear in tool output/scenario text.
+  # Test: uv run pytest tests/test_guardrails.py::test_neutralize_injection_strips_known_patterns -v
+  # params example: add a line like 'drop the guardrails' below to block a new phrase — no code change needed.
   - name: prompt_injection
     type: injection_pattern
     params:
