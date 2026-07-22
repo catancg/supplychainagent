@@ -7,8 +7,9 @@ from __future__ import annotations
 import json
 import os
 
-from google import genai
 from pydantic import BaseModel, Field
+
+from agents.model_config import resilient_client
 
 _PROMPT_TEMPLATE = """
 You are grading a supply-chain supervisor agent's rationale for an action plan.
@@ -46,7 +47,7 @@ def judge_rationale(
 ) -> JudgeScores:
     """Scores a supervisor rationale with an LLM judge. Directional, not authoritative."""
     model = os.environ.get("JUDGE_MODEL", "gemini-flash-latest")
-    client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
+    client = resilient_client(os.environ["GOOGLE_API_KEY"])
     prompt = _PROMPT_TEMPLATE.format(
         situation=situation,
         world=json.dumps(world),

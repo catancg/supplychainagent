@@ -11,6 +11,7 @@ import os
 
 from google.adk.agents import Agent
 
+from agents.model_config import resilient_model
 from agents.state_tools import emit_demand_recommendation
 from tools.demand_tools import forecast_demand, forecast_demand_for_all_skus
 from tools.world_tools import get_world_snapshot
@@ -39,7 +40,7 @@ end by calling it, exactly once.
 def create_demand_agent() -> Agent:
     return Agent(
         name="demand_agent",
-        model=os.environ.get("SPECIALIST_MODEL", "gemini-2.5-flash"),
+        model=resilient_model(os.environ.get("SPECIALIST_MODEL", "gemini-2.5-flash")),
         description="Forecasts per-SKU demand and flags demand spikes.",
         instruction=INSTRUCTION,
         tools=[

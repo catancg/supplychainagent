@@ -11,6 +11,7 @@ import os
 from google.adk.agents import Agent
 
 from agents.guardrails import sanitize_untrusted_tool_output
+from agents.model_config import resilient_model
 from agents.state_tools import emit_inventory_recommendation
 from rag.search import search_policy
 from tools.inventory_tools import (
@@ -55,7 +56,7 @@ by calling it, exactly once.
 def create_inventory_agent() -> Agent:
     return Agent(
         name="inventory_agent",
-        model=os.environ.get("SPECIALIST_MODEL", "gemini-2.5-flash"),
+        model=resilient_model(os.environ.get("SPECIALIST_MODEL", "gemini-2.5-flash")),
         description="Decides which SKU/warehouse combinations need replenishment.",
         instruction=INSTRUCTION,
         tools=[

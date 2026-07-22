@@ -25,6 +25,7 @@ from mcp import StdioServerParameters
 from agents.demand_agent import create_demand_agent
 from agents.guardrails import enforce_action_plan_guardrails
 from agents.inventory_agent import create_inventory_agent
+from agents.model_config import resilient_model
 from agents.observability import TokenUsagePlugin
 from agents.plan_tools import emit_action_plan, read_recommendations
 from agents.procurement_agent import create_procurement_agent
@@ -87,12 +88,15 @@ async def _load_default_scenario(callback_context: CallbackContext) -> None:
         state["situation"] = world.get("situation")
 
 
-def create_supervisor_agent(strict_trigger: bool = False) -> Agent:
-    """strict_trigger=True wires the deterministic trigger-message gate
-    (agents/trigger_guard.py) — for "worker" entry points (webapp, evals)
-    that should only ever run with one fixed, code-constructed instruction.
-    Defaults to False so adk web/adk run (agents/__init__.py) stay an open,
-    unrestricted interactive dev tool — that gate is not applied there.
+def create_supervisor_agent(strict_trigger: bool = True) -> Agent:
+    """strict_trigger=True (the default) wires the deterministic
+    trigger-message gate (agents/trigger_guard.py): only an exact match on
+    EXPECTED_TRIGGER_MESSAGE executes the pipeline — anything else (a
+    greeting, a paraphrase, an injected instruction) is rejected before any
+    model call, everywhere, including adk web. Pass strict_trigger=False
+    explicitly if you ever need an open, unrestricted chat for interactive
+    debugging — that used to be the default; it no longer is, since an open
+    chat surface is itself a prompt-injection risk worth closing by default.
     """
     demand_agent = create_demand_agent()
     inventory_agent = create_inventory_agent()
@@ -117,7 +121,7 @@ def create_supervisor_agent(strict_trigger: bool = False) -> Agent:
 
     return Agent(
         name="supervisor_agent",
-        model=os.environ.get("SUPERVISOR_MODEL", "gemini-flash-latest"),
+        model=resilient_model(os.environ.get("SUPERVISOR_MODEL", "gemini-flash-latest")),
         description="Coordinates demand/inventory/procurement specialists into one action plan.",
         instruction=INSTRUCTION,
         tools=[
@@ -137,7 +141,7 @@ def create_supervisor_agent(strict_trigger: bool = False) -> Agent:
 def create_app(
     name: str = "agents",
     extra_plugins: list[BasePlugin] | None = None,
-    strict_trigger: bool = False,
+    strict_trigger: bool = True,
     token_usage_plugin: TokenUsagePlugin | None = None,
 ) -> App:
     """Wraps the supervisor in an App with the token-usage plugin and context
@@ -145,10 +149,10 @@ def create_app(
     evals/run_evals.py, and webapp/runner_service.py so all execution paths
     behave identically. Pass extra_plugins for per-run additions (e.g. the
     webapp's TraceCollectorPlugin, which needs a fresh instance per request).
-    Pass strict_trigger=True for worker-style callers — see
-    create_supervisor_agent. Pass token_usage_plugin with your own
-    TokenUsagePlugin() instance if you want to read back total_tokens/
-    total_cost_usd/cost_by_agent after the run (same pattern as
+    strict_trigger defaults to True everywhere — see create_supervisor_agent
+    for what it does and when you'd turn it off. Pass token_usage_plugin
+    with your own TokenUsagePlugin() instance if you want to read back
+    total_tokens/total_cost_usd/cost_by_agent after the run (same pattern as
     extra_plugins) — otherwise one is created internally (console-print
     only, not readable by the caller).
     """

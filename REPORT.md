@@ -71,24 +71,30 @@ Key properties:
 | **A2A demo** (`a2a_demo/`) | A standalone, decoupled demonstration of the Agent2Agent protocol — a peer agent served over HTTP, a caller that reaches it as a remote agent. Not wired into the pipeline above. |
 | **Persistence** (`db.py`) | One SQLite file, three tables (`action_plans`, `eval_results`, `run_costs`), plus ADK's own session tables (webapp only, via `DatabaseSessionService`) for conversation persistence across restarts. |
 | **Observability** (`agents/observability.py`) | A `TraceCollectorPlugin` capturing the full nested tool-call tree across the supervisor *and* all three specialists (needed because `adk web`'s own event view can't show nested `AgentTool` sub-runs), plus a `TokenUsagePlugin` for per-call token and estimated-cost accounting (see "Cost tracking" below). |
-| **Trigger security** (`agents/trigger_guard.py`) | A `before_agent_callback` gate for "worker"-style callers (webapp, evals): rejects any invocation whose triggering message isn't an exact match on a fixed, code-constructed instruction, before any model call happens. Opt-in (`strict_trigger=True`) — see §1.3. |
+| **Trigger security** (`agents/trigger_guard.py`) | A `before_agent_callback` gate applied by default to every entry point: rejects any invocation whose triggering message isn't an exact match on a fixed, code-constructed instruction, before any model call happens. `strict_trigger=True` is the default on `create_app()` — see §1.3. |
 | **Cost tracking** (`agents/pricing.py`) | A hardcoded $/1M-token rate table converts each model call's token usage into an estimated USD cost, aggregated per run (overall and per agent) by `TokenUsagePlugin` and persisted to `run_costs` by the webapp/evals (same opt-in pattern as the trigger gate — see §2). |
+| **Transient-error retries** (`agents/model_config.py`) | Every agent's model (and the eval judge's client) carries `google.genai.types.HttpRetryOptions`, the SDK's own HTTP-level retry — applies uniformly to every entry point, including `adk web`, which previously had no retry logic at all. See §2. |
 
 ### 1.3 Entry points
 
 - **`adk web .`** — Google's own interactive UI; auto-loads a default
-  scenario on first turn. Runs with `strict_trigger=False` (the default) —
-  an open, unrestricted chat, by design (a dev/debugging tool, not a
-  production trigger path).
+  scenario on first turn. Executes only on an exact match of
+  `EXPECTED_TRIGGER_MESSAGE` (`strict_trigger=True`, the default) — a
+  greeting or paraphrase is rejected before any model call, same as the
+  other two entry points below.
 - **Custom FastAPI webapp** (`webapp/`) — purpose-built alternative: browse
   scenarios, trigger a run, see the full nested trace with state-change and
-  RAG-usage highlighting, browse run history. Runs with `strict_trigger=True`
-  — the message that starts a run is always the same fixed string, never
-  user-typed text.
+  RAG-usage highlighting, browse run history. The message that starts a run
+  is always the same fixed string, never user-typed text.
 - **`evals.run_evals`** — CLI eval harness; runs the same pipeline against
-  12 curated scenarios and grades the result (see §1.4). Also
-  `strict_trigger=True`.
-- All three ultimately construct the same `App` (`agents/supervisor_agent.py::create_app`), so behavior is consistent regardless of entry point except for this one deliberate difference.
+  12 curated scenarios and grades the result (see §1.4).
+- All three ultimately construct the same `App`
+  (`agents/supervisor_agent.py::create_app`), so behavior is fully
+  consistent across entry points — `strict_trigger` used to default to
+  `False` (open chat for `adk web`, opt-in hardening for the other two);
+  it's now `True` everywhere, opt-out rather than opt-in, after live
+  testing showed `adk web`'s open chat was itself the injection surface
+  worth closing.
 
 ### 1.4 Evaluation model
 
@@ -118,10 +124,11 @@ Two independent grading layers, deliberately asymmetric in authority:
 | Fail-soft tool design | Let validation errors propagate/crash the run | An uncaught `pydantic.ValidationError` once crashed the entire `adk run` process. All `emit_*` tools now catch and return `{"status": "error", ...}`; the ML predictor falls back to the original formula rather than raising if the model file is missing/corrupt. |
 | Two-layer, asymmetric eval grading | Single grading mechanism (e.g. LLM-judge only) | Deterministic assertions are reliable enough to gate CI-style pass/fail; LLM judging is valuable as a *quality* signal (rationale clarity, citation of policy) but not reliable enough to gate on without producing flaky failures unrelated to real correctness. |
 | Batch tool variants (`forecast_demand_for_all_skus`, etc.) + context caching | Per-SKU tool calls in a loop | Directly reduced token spend and latency; per-SKU looping was identified as a concrete cost problem during development. |
-| Trigger validation as a deterministic pre-model gate, opt-in per entry point | A single hardened prompt applied everywhere, including `adk web` | This POC simulates a production shape where a worker (not a human) starts each run with one fixed instruction — so the gate can reject non-conforming input *before* any LLM call, which is strictly stronger than prompt-level defense alone. Making it opt-in (`strict_trigger=True`, used by webapp/evals, off by default for `adk web`) avoids blocking `adk web`'s legitimate role as an open interactive dev tool while still hardening the paths meant to resemble the real thing. |
+| Trigger validation as a deterministic pre-model gate, default-on everywhere | Prompt-level hardening alone; or keeping the gate opt-in with `adk web` exempt (the initial design) | This POC simulates a production shape where a worker (not a human) starts each run with one fixed instruction — so the gate can reject non-conforming input *before* any LLM call, strictly stronger than prompt-level defense alone. Initially shipped opt-in (`strict_trigger=True` for webapp/evals, off for `adk web`, to preserve it as an open dev tool) — reversed to default-on everywhere after live testing showed `adk web`'s open chat was itself exactly the injection surface being defended against; `strict_trigger=False` remains available as an explicit opt-out for anyone who deliberately wants an open chat for debugging. |
 | `SPECIALIST_MODEL` bumped from `flash-lite` to full `flash` | Keep the cheaper model | `flash-lite` intermittently returned empty (zero-token) responses after large tool results in testing — a reliability regression that outweighed the cost savings. |
 | Cost as a new `run_costs` table, not a column on `action_plans` | Add a `cost_usd` column to `action_plans` | `action_plans` rows are written by the supervisor's own MCP tool call, mid-run, before total cost across the whole invocation is known — retrofitting a value there would need a fragile follow-up UPDATE. A separate table, written directly by the same deterministic caller that already writes `eval_results`, avoids that entirely and mirrors the existing "our own code writes directly, no MCP round-trip for non-agent-decisions" principle. |
 | Hardcoded cost-estimate rate table, clearly labeled as an estimate | Skip cost tracking until real billing data is available | Directionally useful today (which agent/scenario is expensive) outweighs the risk of an approximate number, as long as it's never presented as an actual bill — every surface it appears on (console, DB, UI) says "estimated." |
+| SDK-native `HttpRetryOptions` for transient-error retry | A custom ADK `on_model_error_callback` plugin (the initial plan) | The plugin approach was proposed first and would have worked (ADK does expose that hook), but checking the installed `google-genai` SDK found it already has its own HTTP-level retry mechanism, configured directly on the model/client rather than wrapped around a `Runner`. That means it applies to `adk web` automatically (a plugin registered only in `create_app()` would not have), and its default retryable-status-code set already excludes non-retryable 4xx errors — a custom plugin would have had to reimplement both of those correctly. Simpler and more correct than the original proposal. |
 
 ---
 
@@ -136,6 +143,12 @@ Two independent grading layers, deliberately asymmetric in authority:
   during final testing still hit a fully empty `ActionPlan` (the supervisor
   simply never completed its final turn), which passed cleanly on retry.
   **This means any single run can fail for reasons unrelated to the code.**
+  `agents/model_config.py`'s SDK-level retry (added after this was written)
+  now handles the `503`/`429` case automatically at the HTTP layer,
+  everywhere including `adk web` — but a fully empty response with no
+  error raised at all (the `ActionPlan` case above) is a different failure
+  mode entirely and isn't something any retry mechanism can detect on its
+  own, since nothing actually errors.
 - **`adk web`'s built-in trace view cannot show nested `AgentTool`
   sub-runs** — a real blind spot that made early multi-agent coordination
   bugs (e.g. procurement over-ordering because it lacked a tool to read
@@ -167,9 +180,11 @@ Two independent grading layers, deliberately asymmetric in authority:
   it doesn't (and structurally can't) prevent every injection vector; tool
   output and scenario content are separately sanitized, but a genuinely
   new untrusted data source added later would need to be wired into the
-  same sanitization pass explicitly, it isn't automatic. `adk web` also
-  remains deliberately outside the gate's coverage (see §1.3) — it is not
-  a hardened path today.
+  same sanitization pass explicitly, it isn't automatic. It's now applied
+  by default everywhere, including `adk web` (see §1.3) — but this also
+  means `adk web`'s original role as an unrestricted interactive chat is
+  gone by default; anyone who wants that back needs `strict_trigger=False`
+  explicitly.
 - **No fully offline evaluation path** — `evals.run_evals` and any live
   scenario run require real, paid Gemini API calls; there's no
   mocked/offline mode, so verifying agent *behavior* (as opposed to pure

@@ -47,6 +47,8 @@ cp .env.example .env   # then fill in GOOGLE_API_KEY (https://aistudio.google.co
   "Trigger security" below).
 - `agents/pricing.py` — estimated USD cost per model call (see "Cost
   tracking" below).
+- `agents/model_config.py` — automatic retry-on-transient-error for every
+  Gemini call, including `adk web` (see "Transient-error retries" below).
 
 ## Eval scenarios
 
@@ -79,22 +81,18 @@ rejected (over-budget) plans are not.
 
 ## Trigger security
 
-The webapp and `evals.run_evals` are "worker"-style entry points — the
-message that starts a run is a fixed, code-constructed string
-(`agents/trigger_guard.py::EXPECTED_TRIGGER_MESSAGE`), never user-typed
-free text. `create_app(strict_trigger=True)` (used by both) wires a
-`before_agent_callback` that **rejects anything that isn't an exact match
-before any model call happens** — a prompt-injection attempt sent this way
-never reaches Gemini at all (verified: 0 model calls, rejected in ~1ms).
-Scenario data itself is also sanitized for injection-pattern text at load
-time (`loader.py`), reusing the same rule engine that scrubs RAG/MCP output.
-
-**`adk web`/`adk run`** (`agents/__init__.py`, `strict_trigger=False`,
-the default) are **intentionally exempt** — that's Google's own open,
-interactive dev/debugging tool, not a hardened production entry point.
-Anything typed there reaches the supervisor unfiltered by the trigger gate
-(though the sanitized-scenario-data and instruction-level defenses still
-apply). Don't treat `adk web` as a security boundary.
+**Every entry point — `adk web`, the webapp, and `evals.run_evals` —
+executes the pipeline only on an exact match** of a fixed string
+(`agents/trigger_guard.py::EXPECTED_TRIGGER_MESSAGE`, currently
+`"Produce an action plan for the current situation."`). Anything else — a
+greeting, a paraphrase, an embedded instruction trying to override
+behavior — is **rejected before any model call happens**: verified live,
+0 model calls, rejected in ~1ms. `strict_trigger=True` is the default on
+`create_app()`/`create_supervisor_agent()`; pass `strict_trigger=False`
+explicitly if you want an open, unrestricted chat for interactive
+debugging (no caller does this by default anymore). Scenario data itself
+is separately sanitized for injection-pattern text at load time
+(`loader.py`), reusing the same rule engine that scrubs RAG/MCP output.
 
 ## Cost tracking
 
@@ -110,3 +108,21 @@ webapp's Result page (per-run) and History page (`run_costs` table, across
 all runs). `adk web` still prints the per-call console lines but nothing
 persists or reads back its totals — it's driven by the ADK CLI, not this
 project's runner code.
+
+## Transient-error retries
+
+Every agent (demand/inventory/procurement/supervisor, the A2A demo, and the
+eval judge) is built via `agents/model_config.py::resilient_model()`/
+`resilient_client()`, which attaches `google.genai.types.HttpRetryOptions`
+(3 attempts, 2s initial delay, 15s max) to the Gemini model/client itself.
+This is the SDK's **own** HTTP-level retry mechanism, not a custom ADK
+plugin — its default retryable-status-code set (`408`, `429`, and `5xx`)
+already excludes non-retryable 4xx errors (e.g. a `400 INVALID_ARGUMENT`
+from a malformed request would only ever fail again, so it isn't retried).
+Because it's configured on the model, not wrapped around a `Runner`, it
+applies uniformly to **every** entry point — including `adk web`, which
+previously had no retry logic at all and would kill the whole turn on a
+single transient `503 "model overloaded"` error. The webapp/`evals.run_evals`
+still additionally retry the *whole run* (`MAX_RETRIES=2`) as a coarser
+fallback for failures this doesn't catch (non-model errors, e.g. an MCP
+server hiccup).

@@ -9,7 +9,7 @@ architecture/design context.
 uv sync
 cp .env.example .env          # set GOOGLE_API_KEY
 uv run python -m rag.ingest   # once — builds the RAG index
-uv run pytest -q              # expect: 99 passed (no API key needed)
+uv run pytest -q              # expect: 104 passed (no API key needed)
 ```
 
 ---
@@ -141,9 +141,10 @@ asyncio.run(main())
 Expect `elapsed: ~0.00` (no Gemini call happened) and a
 `"Request rejected: ..."` message.
 
-**Note:** this gate only applies to `strict_trigger=True` callers (webapp,
-evals). `adk web` (§1) is intentionally exempt — it's an open dev tool, not
-a hardened entry point.
+**Note:** `strict_trigger=True` is the default for every caller now,
+including `adk web` (§1) — typing anything other than the exact phrase
+above there gets rejected the same way. Pass `strict_trigger=False`
+explicitly if you ever want an open chat for debugging.
 
 ## 9. Verify the cost-per-run metric
 
@@ -164,11 +165,35 @@ Expect rows with `source` = `"webapp"` or `"eval"`, a `cost_usd` total, and
 a `cost_by_agent` breakdown. This is an **estimate** (hardcoded rate table
 in `agents/pricing.py`), not your actual bill.
 
+## 10. Verify transient-error retries (including `adk web`)
+
+**No API key needed:**
+```bash
+uv run pytest tests/test_model_config.py -v   # 5 tests
+```
+Confirms every agent's model (and the eval judge's client) has
+`HttpRetryOptions` attached — this is what makes a `503 "model overloaded"`
+retry automatically at the HTTP layer, **including on `adk web`**, which
+previously had no retry logic at all and would kill the whole turn on one
+transient error. Inspect it directly:
+```bash
+uv run python -c "
+from agents.supervisor_agent import create_supervisor_agent
+agent = create_supervisor_agent()
+print(agent.model.retry_options)
+"
+```
+Expect `attempts=3 initial_delay=2.0 max_delay=15.0`. A genuine `400`
+(malformed request) is deliberately **not** retried — only `408`/`429`/`5xx`
+are, since retrying a permanent error would just fail identically every time.
+
 ---
 
 ## Troubleshooting
 
 - `ImportError` on `adk web`/`adk run`: always use `uv run adk ...`, never
   bare `adk` — another install may be on PATH.
-- Gemini `503`: transient, already retried automatically — just re-run.
+- Gemini `503`: now retried automatically at the HTTP layer (see §10) —
+  including on `adk web`. If you still see one, all 3 attempts were
+  exhausted; just re-run.
 - RAG looks empty: run `uv run python -m rag.ingest` first.

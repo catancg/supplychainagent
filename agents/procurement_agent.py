@@ -16,6 +16,7 @@ from google.adk.tools.mcp_tool.mcp_session_manager import StdioConnectionParams
 from mcp import StdioServerParameters
 
 from agents.guardrails import sanitize_untrusted_tool_output
+from agents.model_config import resilient_model
 from agents.state_tools import emit_procurement_recommendation
 from rag.search import search_policy
 from tools.procurement_tools import (
@@ -76,7 +77,7 @@ def create_procurement_agent() -> Agent:
     )
     return Agent(
         name="procurement_agent",
-        model=os.environ.get("SPECIALIST_MODEL", "gemini-2.5-flash"),
+        model=resilient_model(os.environ.get("SPECIALIST_MODEL", "gemini-2.5-flash")),
         description="Chooses suppliers per order, weighing cost, lead time, reliability, and budget.",
         instruction=INSTRUCTION,
         tools=[

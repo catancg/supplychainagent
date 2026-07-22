@@ -24,6 +24,8 @@ from google.adk.sessions import InMemorySessionService
 from google.adk.tools import AgentTool
 from google.genai import types
 
+from agents.model_config import resilient_model
+
 PEER_CARD_URL = "http://localhost:8001/.well-known/agent-card.json"
 APP_NAME = "a2a_demo_caller"
 USER_ID = "a2a_demo_user"
@@ -45,7 +47,7 @@ def _build_caller_agent() -> Agent:
     )
     return Agent(
         name="a2a_demo_caller",
-        model=os.environ.get("SPECIALIST_MODEL", "gemini-2.5-flash"),
+        model=resilient_model(os.environ.get("SPECIALIST_MODEL", "gemini-2.5-flash")),
         description="Local demo agent that delegates lead-time questions to a remote A2A peer.",
         instruction=CALLER_INSTRUCTION,
         tools=[AgentTool(agent=remote_peer)],

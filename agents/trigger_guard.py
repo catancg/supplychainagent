@@ -1,17 +1,17 @@
-"""Deterministic trigger-message gate for the supervisor's "worker" entry
-points (webapp, evals) — the strongest available defense against prompt
-injection at the very first turn: the check runs before any model call, so
-a non-conforming message never reaches the LLM at all.
+"""Deterministic trigger-message gate — the strongest available defense
+against prompt injection at the very first turn: the check runs before any
+model call, so a non-conforming message never reaches the LLM at all.
 
-This agent is meant to be started by an automated worker with one fixed
-instruction, not chatted with. `enforce_expected_trigger` (a
-before_agent_callback) rejects anything that doesn't match that instruction
-exactly, short-circuiting the whole invocation.
+This agent is meant to be started with one fixed instruction, not chatted
+with. `enforce_expected_trigger` (a before_agent_callback) rejects anything
+that doesn't match that instruction exactly, short-circuiting the whole
+invocation.
 
-Deliberately NOT wired onto the `adk web`/`adk run` app (see
-agents/__init__.py) — that's an open interactive dev tool, not a
-production trigger path. See docs/phase1-guardrail-templates.prd's sibling
-concerns and README.md for the split.
+Wired on by default everywhere (agents/__init__.py for adk web, the webapp,
+evals) via create_app()/create_supervisor_agent()'s strict_trigger=True
+default — see agents/supervisor_agent.py. Pass strict_trigger=False
+explicitly if you ever need an open, unrestricted chat for interactive
+debugging.
 """
 
 from __future__ import annotations

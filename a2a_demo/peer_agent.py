@@ -15,6 +15,8 @@ import os
 
 from google.adk.agents import Agent
 
+from agents.model_config import resilient_model
+
 # Synthetic but deterministic — same region always returns the same
 # estimate, same spirit as mcp_server/market_data.py's FX rates. Unlisted
 # regions fall back to a stable, hash-derived estimate (hashlib, not the
@@ -58,7 +60,7 @@ source). Keep responses short and factual.
 def create_peer_agent() -> Agent:
     return Agent(
         name="partner_logistics_peer",
-        model=os.environ.get("SPECIALIST_MODEL", "gemini-2.5-flash"),
+        model=resilient_model(os.environ.get("SPECIALIST_MODEL", "gemini-2.5-flash")),
         description="partner-logistics-org's demo agent — answers lead-time questions over A2A.",
         instruction=INSTRUCTION,
         tools=[get_partner_lead_time_estimate],
